@@ -80,10 +80,22 @@ function sparkline(key, color) {
   if (!pts || pts.length < 1) return "";
   const w = 100, h = 32;
   const max = 100;
+  const gradId = `g_${key.split("|").join("_").replace(/[^a-zA-Z0-9_]/g, "_")}`;
   if (pts.length === 1) {
     const ly = (h - (pts[0] / max) * h).toFixed(1);
+    const x = (w / 2).toFixed(1);
+    const area = `0,${h} ${x},${ly} ${w},${h}`;
     return `<div class="spark"><svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
-      <circle cx="2" cy="${ly}" r="2.2" fill="${color}"/>
+      <defs>
+        <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="${color}" stop-opacity="0.42"/>
+          <stop offset="100%" stop-color="${color}" stop-opacity="0.05"/>
+        </linearGradient>
+      </defs>
+      <polygon points="${area}" fill="url(#${gradId})" />
+      <line x1="0" y1="${h}" x2="${w}" y2="${h}" stroke="${color}" stroke-opacity="0.22"/>
+      <polyline points="0,${ly} ${x},${ly} ${w},${ly}" fill="none" stroke="${color}" stroke-width="2.2" vector-effect="non-scaling-stroke"/>
+      <circle cx="${x}" cy="${ly}" r="2.4" fill="${color}"/>
     </svg></div>`;
   }
   const step = w / (pts.length - 1);
@@ -93,7 +105,14 @@ function sparkline(key, color) {
   const ly = (h - (last / max) * h).toFixed(1);
   const area = `0,${h} ${coords} ${w},${h}`;
   return `<div class="spark"><svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
-    <polyline points="${area}" fill="${color}" fill-opacity="0.15" stroke="none"/>
+    <defs>
+      <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="${color}" stop-opacity="0.45"/>
+        <stop offset="100%" stop-color="${color}" stop-opacity="0.05"/>
+      </linearGradient>
+    </defs>
+    <polygon points="${area}" fill="url(#${gradId})" />
+    <line x1="0" y1="${h}" x2="${w}" y2="${h}" stroke="${color}" stroke-opacity="0.22"/>
     <polyline points="${coords}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"/>
     <circle cx="${lx}" cy="${ly}" r="2.4" fill="${color}"/>
   </svg></div>`;
