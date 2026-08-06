@@ -18,6 +18,25 @@ An on-machine dashboard that pulls usage/credit usage data from multiple AI prov
 - First snapshot is collected on startup, then refreshed by a background loop
 - `tmux` control script (`ctl.sh`) for convenient process control
 
+## UI Page
+
+![AI Usage Dashboard](./ui-page.svg)
+
+This is the live dashboard page rendered at `/`.
+
+- `index` serves this page directly from embedded HTML
+- cards refresh automatically and poll `/data.json`
+- history chart lines read from `/history.json`
+
+To open the actual page:
+
+```bash
+./target/release/aidash
+# open http://127.0.0.1:8000
+```
+
+To view static structure only (no backend needed), open [index.html](/home/dump/aidash/index.html) directly.
+
 ---
 
 ## Project structure
