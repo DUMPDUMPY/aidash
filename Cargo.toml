@@ -1,0 +1,19 @@
+[package]
+name = "aidash"
+version = "0.1.0"
+edition = "2021"
+description = "AI usage dashboard for z.ai, Claude, Codex"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+axum = "0.8"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
