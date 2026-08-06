@@ -38,3 +38,14 @@ All notable changes to this project will be documented in this file.
 ### Docs
 
 - Updated `README.md` to document the UI trend chart behavior.
+
+## [0.1.2] - 2026-08-06
+
+### Changed
+
+- Refined area sparkline rendering in `index.html` for higher contrast on both normal and single-point history states.
+- Increased visual distinction between area fill, stroke, and baseline for better trend recognition at small scale.
+
+### Docs
+
+- Added changelog note reflecting the latest visualization behavior.
