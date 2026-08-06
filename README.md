@@ -26,7 +26,13 @@ This is the live dashboard page rendered at `/`.
 
 - `index` serves this page directly from embedded HTML
 - cards refresh automatically and poll `/data.json`
-- history chart lines read from `/history.json`
+- history chart uses a gradient filled area sparkline (instead of line-only) from `/history.json`
+
+Recent UI refresh details:
+
+- sparkline now renders filled gradient area to emphasize trend shape
+- each series has a stronger stroke and explicit baseline for better readability
+- single-point history uses a minimal filled baseline shape for consistent appearance
 
 To open the actual page:
 
