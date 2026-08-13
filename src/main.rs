@@ -156,17 +156,30 @@ async fn collect_claude(cfg: &Cfg, client: &reqwest::Client) -> Value {
 }
 
 // ---------- Codex ----------
-async fn codex_get(client: &reqwest::Client, token: &str, account_id: &str) -> Result<String, String> {
-    let mut req = client
-        .get("https://chatgpt.com/backend-api/wham/usage")
-        .header(header::AUTHORIZATION, format!("Bearer {token}"))
-        .header(header::ACCEPT, "application/json")
-        .header(header::ORIGIN, "https://chatgpt.com");
-    if !account_id.is_empty() {
-        req = req.header("ChatGPT-Account-Id", account_id);
+async fn codex_get(client: &reqwest::Client, token: &str, account_id: &str) -> Result<(u16, String), String> {
+    let do_req = || async {
+        let mut req = client
+            .get("https://chatgpt.com/backend-api/wham/usage")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::ACCEPT, "application/json")
+            .header(header::ORIGIN, "https://chatgpt.com");
+        if !account_id.is_empty() {
+            req = req.header("ChatGPT-Account-Id", account_id);
+        }
+        let r = req.send().await.map_err(|e| format!("send: {e}"))?;
+        let status = r.status().as_u16();
+        let body = r.text().await.map_err(|e| format!("read body: {e}"))?;
+        Ok::<_, String>((status, body))
+    };
+    // one retry on transient transport error (stale pooled connection, brief reset)
+    match do_req().await {
+        Ok(x) => Ok(x),
+        Err(e1) => {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let (status, body) = do_req().await.map_err(|e2| format!("retry failed: {e1} | {e2}"))?;
+            Ok((status, body))
+        }
     }
-    let r = req.send().await.map_err(|e| e.to_string())?;
-    Ok(r.text().await.unwrap_or_default())
 }
 
 async fn codex_refresh(client: &reqwest::Client, refresh: &str) -> Result<(String, Option<String>, Option<String>), String> {
@@ -223,13 +236,18 @@ async fn collect_codex(cfg: &Cfg, client: &reqwest::Client) -> Value {
         return json!({"provider":"codex","status":"error","error":"no access token"});
     }
 
-    let mut body = codex_get(client, &token, &account_id).await.unwrap_or_default();
+    let (mut status, mut body) = match codex_get(client, &token, &account_id).await {
+        Ok(x) => x,
+        Err(e) => return json!({"provider":"codex","status":"error","error":e}),
+    };
     let mut parsed: Result<Value, _> = serde_json::from_str(&body);
 
-    // 401 -> try refresh (read-only; never write back to auth file)
-    if parsed.as_ref().ok().and_then(|v| v.get("error")).is_some() {
+    // 401/403 or error field -> try refresh (read-only; never write back to auth file)
+    let needs_refresh = status == 401 || status == 403
+        || parsed.as_ref().ok().and_then(|v| v.get("error")).is_some();
+    if needs_refresh {
         if std::env::var("CODEX_DISABLE_REFRESH").ok().as_deref() == Some("1") {
-            return json!({"provider":"codex","status":"error","error":"token invalid","limits":[]});
+            return json!({"provider":"codex","status":"error","error":format!("http {status}: token invalid"),"limits":[]});
         }
         let refresh = v
             .pointer("/tokens/refresh_token")
@@ -239,17 +257,30 @@ async fn collect_codex(cfg: &Cfg, client: &reqwest::Client) -> Value {
             match codex_refresh(client, refresh).await {
                 Ok((at, _, _)) => {
                     token = at;
-                    body = codex_get(client, &token, &account_id).await.unwrap_or_default();
-                    parsed = serde_json::from_str(&body);
+                    match codex_get(client, &token, &account_id).await {
+                        Ok((s, b)) => {
+                            status = s;
+                            body = b;
+                            parsed = serde_json::from_str(&body);
+                        }
+                        Err(e) => return json!({"provider":"codex","status":"error","error":e}),
+                    }
                 }
                 Err(e) => return json!({"provider":"codex","status":"error","error":e}),
             }
         }
     }
 
+    if status != 200 {
+        let snippet: String = body.chars().take(160).collect();
+        return json!({"provider":"codex","status":"error","error":format!("http {status}: {snippet}")});
+    }
     let v: Value = match parsed {
         Ok(v) => v,
-        Err(_) => return json!({"provider":"codex","status":"error","error":"bad json"}),
+        Err(e) => {
+            let snippet: String = body.chars().take(160).collect();
+            return json!({"provider":"codex","status":"error","error":format!("parse: {e}; body: {snippet}")});
+        }
     };
     if let Some(err) = v.get("error") {
         return json!({"provider":"codex","status":"error","error":err});

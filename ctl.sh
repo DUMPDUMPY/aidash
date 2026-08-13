@@ -9,7 +9,7 @@ SESSION="AI-Dashboard"
 LOGFILE="$DIR/aidash.log"
 
 # config (override via env)
-: "${AIDASH_INTERVAL:=60}"
+: "${AIDASH_INTERVAL:=120}"
 : "${AIDASH_LISTEN:=0.0.0.0:8000}"
 
 running() {
@@ -75,7 +75,7 @@ case "${1:-}" in
   logs)    cmd_logs ;;
   *)
     echo "usage: $0 {start|stop|restart|status|attach|logs}"
-    echo "env: AIDASH_INTERVAL (default 60), AIDASH_LISTEN (default 0.0.0.0:8000)"
+    echo "env: AIDASH_INTERVAL (default 120), AIDASH_LISTEN (default 0.0.0.0:8000)"
     exit 2
     ;;
 esac
