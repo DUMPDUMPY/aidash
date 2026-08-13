@@ -171,15 +171,18 @@ async fn codex_get(client: &reqwest::Client, token: &str, account_id: &str) -> R
         let body = r.text().await.map_err(|e| format!("read body: {e}"))?;
         Ok::<_, String>((status, body))
     };
-    // one retry on transient transport error (stale pooled connection, brief reset)
-    match do_req().await {
-        Ok(x) => Ok(x),
-        Err(e1) => {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            let (status, body) = do_req().await.map_err(|e2| format!("retry failed: {e1} | {e2}"))?;
-            Ok((status, body))
+    // retry on transient transport error (stale pooled connection, brief reset)
+    let mut last_err = String::new();
+    for attempt in 0..3u32 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_secs(2u64 << (attempt - 1))).await; // 2s, then 4s
+        }
+        match do_req().await {
+            Ok(x) => return Ok(x),
+            Err(e) => last_err = format!("attempt {}: {e}", attempt + 1),
         }
     }
+    Err(format!("all 3 attempts failed; last: {last_err}"))
 }
 
 async fn codex_refresh(client: &reqwest::Client, refresh: &str) -> Result<(String, Option<String>, Option<String>), String> {
@@ -417,6 +420,7 @@ async fn main() {
     let cfg = Cfg::from_env();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
+        .pool_max_idle_per_host(0)
         .build()
         .expect("build client");
 
