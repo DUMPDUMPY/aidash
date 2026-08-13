@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.2] - 2026-08-13
+
+### Fixed
+
+- The 1.0.1 retry was insufficient: when the reqwest idle pool handed back a half-dead rustls/HTTP-2 connection, both the initial send and its single retry failed at the transport layer, leaving Codex with no data.
+- Disabled keep-alive pooling entirely (`pool_max_idle_per_host(0)`) so every request opens a fresh connection — matching `curl` behavior, which was 100% reliable in testing. This removes the stale-connection failure mode at the root.
+- Retries increased to 3 attempts (2 s then 4 s backoff) for tolerance of genuine short network blips.
+
 ## [1.0.1] - 2026-08-13
 
 ### Fixed
