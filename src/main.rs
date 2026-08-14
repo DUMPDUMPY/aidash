@@ -11,12 +11,19 @@ const HTML: &str = include_str!("../index.html");
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const ZAI_UA: &str = "aidash/0.1";
 const CLAUDE_UA: &str = "claude-code/1.0.0";
+// Antigravity (Windsurf-fork) talks to Gemini Cloud Code internal API.
+// Server rejects requests without an "antigravity/..." User-Agent (403).
+const AG_UA: &str = "antigravity/1.0.0 linux/amd64";
+const AG_CLIENT_ID: &str = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
+const AG_CLIENT_SECRET: &str = "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";
+const AG_BASE: &str = "https://cloudcode-pa.googleapis.com";
 
 #[derive(Clone)]
 struct Cfg {
     zai_key_file: PathBuf,
     claude_cred_file: PathBuf,
     codex_auth_file: PathBuf,
+    antigravity_token_file: PathBuf,
     listen: String,
     interval: Duration,
 }
@@ -39,6 +46,10 @@ impl Cfg {
             ),
             codex_auth_file: PathBuf::from(
                 env::var("CODEX_AUTH_FILE").unwrap_or_else(|_| format!("{home}/.codex/auth.json")),
+            ),
+            antigravity_token_file: PathBuf::from(
+                env::var("ANTIGRAVITY_TOKEN_FILE")
+                    .unwrap_or_else(|_| format!("{home}/.gemini/antigravity-cli/antigravity-oauth-token")),
             ),
             listen: env::var("AIDASH_LISTEN").unwrap_or_else(|_| "0.0.0.0:8000".into()),
             interval: Duration::from_secs(
@@ -329,14 +340,225 @@ async fn collect_codex(cfg: &Cfg, client: &reqwest::Client) -> Value {
     json!({"provider":"codex","status":"ok","plan":plan,"email":email,"limits":limits})
 }
 
+// "gemini-3-pro" | "claude-opus-4-6-thinking" | "gpt-oss-120b" -> "Gemini" / "Claude" / "GPT"
+fn model_family(name: &str) -> &'static str {
+    let n = name.to_lowercase();
+    if n.starts_with("gemini") {
+        "Gemini"
+    } else if n.starts_with("claude") {
+        "Claude"
+    } else if n.starts_with("gpt") {
+        "GPT"
+    } else {
+        "Other"
+    }
+}
+
+fn pool_label(names: &[String]) -> String {
+    let mut fams: Vec<&str> = names.iter().map(|n| model_family(n)).collect();
+    fams.sort();
+    fams.dedup();
+    let fam = match fams.as_slice() {
+        [f] => (*f).to_string(),
+        fs => fs.join(" + "),
+    };
+    if names.len() > 1 {
+        format!("{fam} pool ×{}", names.len())
+    } else {
+        fam
+    }
+}
+
+// ---------- Antigravity ----------
+async fn ag_post(
+    client: &reqwest::Client,
+    path: &str,
+    token: &str,
+    body: &str,
+) -> Result<(u16, String), String> {
+    let r = client
+        .post(format!("{AG_BASE}{path}"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::USER_AGENT, AG_UA)
+        .body(body.to_string())
+        .send()
+        .await
+        .map_err(|e| format!("send: {e}"))?;
+    let status = r.status().as_u16();
+    let body = r.text().await.map_err(|e| format!("read body: {e}"))?;
+    Ok((status, body))
+}
+
+async fn ag_refresh(client: &reqwest::Client, refresh: &str) -> Result<String, String> {
+    let r = client
+        .post("https://oauth2.googleapis.com/token")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(format!(
+            "grant_type=refresh_token&client_id={}&client_secret={}&refresh_token={}",
+            urlenc(AG_CLIENT_ID),
+            urlenc(AG_CLIENT_SECRET),
+            urlenc(refresh)
+        ))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let body = r.text().await.unwrap_or_default();
+    let v: Value = serde_json::from_str(&body).map_err(|e| format!("refresh parse: {e}"))?;
+    v.get("access_token")
+        .and_then(|t| t.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "refresh failed".into())
+}
+
+async fn collect_antigravity(cfg: &Cfg, client: &reqwest::Client) -> Value {
+    let err = |e: String| json!({"provider":"antigravity","status":"error","error":e});
+    let raw = match read_file(&cfg.antigravity_token_file) {
+        Ok(r) => r,
+        Err(e) => return err(e),
+    };
+    let v: Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => return err(format!("parse token file: {e}")),
+    };
+    let mut token = v
+        .pointer("/token/access_token")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    if token.is_empty() {
+        return err("no access token".into());
+    }
+
+    let models_body = "{}";
+    let (mut status, mut body) = match ag_post(client, "/v1internal:fetchAvailableModels", &token, models_body).await {
+        Ok(x) => x,
+        Err(e) => return err(e),
+    };
+
+    // 401 -> refresh once and retry (read-only; never write back to token file)
+    if status == 401 {
+        let refresh = v.pointer("/token/refresh_token").and_then(|t| t.as_str()).unwrap_or("");
+        if refresh.is_empty() {
+            return err("token expired, no refresh token".into());
+        }
+        token = match ag_refresh(client, refresh).await {
+            Ok(t) => t,
+            Err(e) => return err(format!("token refresh: {e}")),
+        };
+        match ag_post(client, "/v1internal:fetchAvailableModels", &token, models_body).await {
+            Ok((s, b)) => {
+                status = s;
+                body = b;
+            }
+            Err(e) => return err(e),
+        }
+    }
+
+    if status != 200 {
+        let snippet: String = body.chars().take(160).collect();
+        return err(format!("http {status}: {snippet}"));
+    }
+    let mv: Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => return err(format!("parse models: {e}")),
+    };
+
+    // plan/tier via loadCodeAssist (best-effort; ignore failures)
+    let mut plan = Value::Null;
+    if let Ok((s, b)) = ag_post(
+        client,
+        "/v1internal:loadCodeAssist",
+        &token,
+        r#"{"metadata":{"ideName":"antigravity","ideType":"ANTIGRAVITY","ideVersion":"1.0.0","pluginVersion":"0.1","platform":"LINUX_AMD64","updateChannel":"stable","pluginType":"GEMINI"},"mode":"FULL_ELIGIBILITY_CHECK"}"#,
+    )
+    .await
+    {
+        if s == 200 {
+            if let Ok(lv) = serde_json::from_str::<Value>(&b) {
+                plan = lv
+                    .pointer("/paidTier/id")
+                    .or_else(|| lv.pointer("/currentTier/id"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+            }
+        }
+    }
+
+    // models map -> group by quota pool: identical remainingFraction = shared pool.
+    // resetTime is reported inconsistently by the API (sometimes cached/omitted),
+    // so take any non-null reset present in the group instead of splitting on it.
+    let mut pools: std::collections::HashMap<u64, (Vec<String>, Option<i64>)> =
+        std::collections::HashMap::new();
+    let mut unknown: Vec<String> = Vec::new();
+    if let Some(models) = mv.get("models").and_then(|m| m.as_object()) {
+        for (name, info) in models {
+            if info.get("displayName").and_then(|d| d.as_str()).map_or(true, |d| d.is_empty()) {
+                continue; // skip internal/unnamed entries (chat_*, tab_*)
+            }
+            let qi = match info.get("quotaInfo") {
+                Some(q) if !q.is_null() => q,
+                _ => {
+                    unknown.push(name.clone());
+                    continue;
+                }
+            };
+            let rem = qi.get("remainingFraction").and_then(|f| f.as_f64()).unwrap_or(1.0);
+            let reset = qi
+                .get("resetTime")
+                .and_then(|t| t.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.timestamp());
+            let entry = pools.entry(rem.to_bits()).or_default();
+            entry.0.push(name.clone());
+            if reset.is_some() {
+                entry.1 = reset;
+            }
+        }
+    }
+    let mut limits: Vec<Value> = pools
+        .into_iter()
+        .map(|(bits, (names, reset))| {
+            let rem = f64::from_bits(bits);
+            let pct = ((1.0 - rem) * 100.0).clamp(0.0, 100.0);
+            let label = pool_label(&names);
+            json!({
+                "label": label,
+                "models": names,
+                "used_percent": pct,
+                "remaining_percent": (100.0 - pct).max(0.0),
+                "resets_at": reset.map(|r| r as f64),
+            })
+        })
+        .collect();
+    limits.sort_by(|a, b| {
+        let av = a.get("used_percent").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let bv = b.get("used_percent").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if !unknown.is_empty() {
+        limits.push(json!({
+            "label": format!("no quota data ×{}", unknown.len()),
+            "models": unknown,
+            "unknown": true,
+            "used_percent": null,
+        }));
+    }
+    if limits.is_empty() {
+        return err("no models with quota returned".into());
+    }
+    json!({"provider":"antigravity","status":"ok","plan":plan,"limits":limits})
+}
+
 // ---------- aggregate ----------
 async fn collect_all(state: &AppState) -> Value {
-    let (zai, claude, codex) = tokio::join!(
+    let (zai, claude, codex, antigravity) = tokio::join!(
         collect_zai(&state.cfg, &state.client),
         collect_claude(&state.cfg, &state.client),
-        collect_codex(&state.cfg, &state.client)
+        collect_codex(&state.cfg, &state.client),
+        collect_antigravity(&state.cfg, &state.client)
     );
-    let providers = vec![zai, claude, codex];
+    let providers = vec![zai, claude, codex, antigravity];
     let any_error = providers.iter().any(|p| !is_ok_status(p));
     json!({
         "collected": Utc::now().to_rfc3339(),
