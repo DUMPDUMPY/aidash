@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.0] - 2026-08-14
+
+### Added
+
+- **Antigravity provider** (Google's Antigravity IDE): per-model quota monitoring via the Gemini Cloud Code internal API (`cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels`), using the local OAuth token from `~/.gemini/antigravity-cli/antigravity-oauth-token`.
+- Models sharing an identical `remainingFraction` are collapsed into one row per quota pool (e.g. "Gemini pool ×16"); click a pool row to expand the member list.
+- Models where the API omits `quotaInfo` are grouped into a separate grey "no quota data" row instead of being merged into a pool.
+- Plan/tier resolution via `v1internal:loadCodeAssist` (e.g. `g1-pro-tier`).
+- Token auto-refresh through `oauth2.googleapis.com` on 401 (read-only; the token file is never written back).
+- Antigravity card in the dashboard UI with pool dropdown, tooltips, and 5-hour rolling-window reset countdown.
+
+### Notes
+
+- The Cloud Code API rejects requests without an `antigravity/<version>` User-Agent (403); the collector sends one.
+- `resetTime` is reported inconsistently by the API (cached/omitted across calls); grouping keys on `remainingFraction` only and takes any reset time present in the group.
+
 ## [1.0.2] - 2026-08-13
 
 ### Fixed

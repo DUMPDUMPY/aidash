@@ -1,8 +1,8 @@
 [package]
 name = "aidash"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "AI usage dashboard for z.ai, Claude, Codex"
+description = "AI usage dashboard for z.ai, Claude, Codex, Antigravity"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
