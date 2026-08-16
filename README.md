@@ -92,6 +92,7 @@ Defaults in code:
 - `ZAI_KEY_FILE`: `$HOME/aidash/zai.key`
 - `CLAUDE_CRED_FILE`: `$HOME/.claude/.credentials.json`
 - `CODEX_AUTH_FILE`: `$HOME/.codex/auth.json`
+- `ANTIGRAVITY_TOKEN_FILE`: `$HOME/.gemini/antigravity-cli/antigravity-oauth-token`
 
 ---
 
@@ -108,7 +109,7 @@ Log file: `aidash.log` (created while running via script)
 
 Default script overrides:
 
-- `AIDASH_INTERVAL` = `60`
+- `AIDASH_INTERVAL` = `120`
 - `AIDASH_LISTEN` = `0.0.0.0:8000`
 
 Example with custom values:
@@ -141,6 +142,27 @@ AIDASH_INTERVAL=120 AIDASH_LISTEN=127.0.0.1:9000 ./ctl.sh start
           "resets_at": 1754486400
         }
       ]
+    },
+    {
+      "provider": "antigravity",
+      "status": "ok",
+      "plan": "g1-pro-tier",
+      "limits": [
+        {
+          "label": "Gemini pool ×16",
+          "models": ["gemini-3.6-flash-medium", "gemini-3.1-pro-high", "..."],
+          "used_percent": 4.5,
+          "remaining_percent": 95.5,
+          "resets_at": 1786886264
+        },
+        {
+          "label": "Claude + GPT pool ×3 — limit hit",
+          "models": ["claude-opus-4-6-thinking", "claude-sonnet-4-6", "gpt-oss-120b-medium"],
+          "used_percent": 100.0,
+          "remaining_percent": 0.0,
+          "resets_at": 1786886250
+        }
+      ]
     }
   ]
 }
@@ -159,6 +181,7 @@ Array of snapshots, each containing trimmed provider usage points for sparkline 
 - Codex: JSON file with:
   - `tokens.access_token`
   - `tokens.refresh_token` (used when access token expires, unless `CODEX_DISABLE_REFRESH=1`)
+- Antigravity: JSON file with `token.access_token` / `token.refresh_token` (path from `ANTIGRAVITY_TOKEN_FILE`; created by `agy` login)
 
 Never commit these credential files.
 
