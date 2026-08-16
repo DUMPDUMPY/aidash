@@ -6,7 +6,7 @@ This repository is `aidash`, a Rust + Axum dashboard that polls multiple AI usag
 
 ## Purpose
 
-- Aggregate usage data from z.ai, Claude, and Codex.
+- Aggregate usage data from z.ai, Claude, Codex, and Antigravity.
 - Keep data in memory and provide:
   - latest snapshot at `/data.json`
   - short history at `/history.json`
@@ -29,6 +29,7 @@ Set these before running.
 - `ZAI_KEY_FILE` (default `$HOME/aidash/zai.key`)
 - `CLAUDE_CRED_FILE` (default `$HOME/.claude/.credentials.json`)
 - `CODEX_AUTH_FILE` (default `$HOME/.codex/auth.json`)
+- `ANTIGRAVITY_TOKEN_FILE` (default `$HOME/.gemini/antigravity-cli/antigravity-oauth-token`)
 - `AIDASH_LISTEN` (default `0.0.0.0:8000`)
 - `AIDASH_INTERVAL` (default `300`, seconds)
 - `CODEX_DISABLE_REFRESH` (optional, set `1` to skip token refresh path)
@@ -70,6 +71,10 @@ Set these before running.
   - `used_percent`
   - `remaining_percent`
   - optional `resets_at`
+- Antigravity limit objects additionally carry:
+  - `models`: list of model IDs in the quota pool
+  - rows with `"unknown": true` and `used_percent: null` mean the API returned no quota info
+  - a row labeled `... — limit hit` means the pool is exhausted (5h window)
 - `any_error` in `/data.json` indicates any provider returned non-`ok`.
 
 ## Safety and secrets
