@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.2] - 2026-08-16
+
+### Docs
+
+- README: `ANTIGRAVITY_TOKEN_FILE` added to env defaults and required-credentials sections; `/data.json` example now includes an Antigravity provider (pool row + limit-hit row); corrected `ctl.sh` default interval (120, not 60)
+- AGENTES.md: Antigravity added to provider list, environment variables, and data model notes (`models` field, `unknown` rows, limit-hit rows)
+
 ## [1.1.1] - 2026-08-16
 
 ### Fixed
