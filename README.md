@@ -5,6 +5,7 @@ An on-machine dashboard that pulls usage/credit usage data from multiple AI prov
 - Backend: `Rust + Axum`
 - Frontend: `index.html` embedded in binary via `include_str!`
 - Storage: in-memory snapshot buffer (no database)
+- Providers: **z.ai**, **Claude**, **Codex**, **Antigravity**
 
 ---
 
@@ -17,6 +18,17 @@ An on-machine dashboard that pulls usage/credit usage data from multiple AI prov
   - `GET /history.json` for historical snapshots used by sparkline charts
 - First snapshot is collected on startup, then refreshed by a background loop
 - `tmux` control script (`ctl.sh`) for convenient process control
+
+### Antigravity (Google)
+
+- Reads the local OAuth token from `~/.gemini/antigravity-cli/antigravity-oauth-token` (created by the `agy` CLI / Antigravity IDE login)
+- Queries the Gemini Cloud Code internal API (`cloudcode-pa.googleapis.com`) for per-model quota
+- Models sharing a quota pool (identical `remainingFraction`) collapse into one row (e.g. *Gemini pool ×16*); click to expand the model list
+- A pool that hit its 5-hour limit shows as **100% — limit hit** with reset countdown
+- Models with no quota data yet are grouped into a grey *no quota data* row
+- Plan/tier badge (e.g. `g1-pro-tier`) via `loadCodeAssist`
+- Auto-refreshes the OAuth token on 401 (read-only; never writes back to the token file)
+- Override token path with `ANTIGRAVITY_TOKEN_FILE`
 
 ## UI Page
 

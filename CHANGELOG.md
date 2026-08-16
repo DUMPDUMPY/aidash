@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.1] - 2026-08-16
+
+### Fixed
+
+- Antigravity pools that hit the 5-hour limit showed 0% used instead of 100%. The API reports an exhausted pool as `quotaInfo` present but `remainingFraction: null` (with `resetTime` still set); previously `null` defaulted to "nothing used". Exhausted pools now render as **limit hit** rows (100%, red) with reset countdown, distinct from models with no quota data at all.
+
 ## [1.1.0] - 2026-08-14
 
 ### Added
