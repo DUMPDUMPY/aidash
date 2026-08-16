@@ -491,6 +491,8 @@ async fn collect_antigravity(cfg: &Cfg, client: &reqwest::Client) -> Value {
     let mut pools: std::collections::HashMap<u64, (Vec<String>, Option<i64>)> =
         std::collections::HashMap::new();
     let mut unknown: Vec<String> = Vec::new();
+    let mut exhausted: Vec<String> = Vec::new();
+    let mut exhausted_reset: Option<i64> = None;
     if let Some(models) = mv.get("models").and_then(|m| m.as_object()) {
         for (name, info) in models {
             if info.get("displayName").and_then(|d| d.as_str()).map_or(true, |d| d.is_empty()) {
@@ -503,7 +505,23 @@ async fn collect_antigravity(cfg: &Cfg, client: &reqwest::Client) -> Value {
                     continue;
                 }
             };
-            let rem = qi.get("remainingFraction").and_then(|f| f.as_f64()).unwrap_or(1.0);
+            // quotaInfo present but remainingFraction null = pool exhausted (5hr limit hit);
+            // resetTime still tells when it comes back.
+            let rem = match qi.get("remainingFraction").and_then(|f| f.as_f64()) {
+                Some(r) => r,
+                None => {
+                    exhausted.push(name.clone());
+                    let reset = qi
+                        .get("resetTime")
+                        .and_then(|t| t.as_str())
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.timestamp());
+                    if let Some(r) = reset {
+                        exhausted_reset = Some(r);
+                    }
+                    continue;
+                }
+            };
             let reset = qi
                 .get("resetTime")
                 .and_then(|t| t.as_str())
@@ -536,6 +554,16 @@ async fn collect_antigravity(cfg: &Cfg, client: &reqwest::Client) -> Value {
         let bv = b.get("used_percent").and_then(|x| x.as_f64()).unwrap_or(0.0);
         bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal)
     });
+    if !exhausted.is_empty() {
+        let label = pool_label(&exhausted);
+        limits.push(json!({
+            "label": format!("{label} — limit hit"),
+            "models": exhausted,
+            "used_percent": 100.0,
+            "remaining_percent": 0.0,
+            "resets_at": exhausted_reset.map(|r| r as f64),
+        }));
+    }
     if !unknown.is_empty() {
         limits.push(json!({
             "label": format!("no quota data ×{}", unknown.len()),
