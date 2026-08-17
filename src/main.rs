@@ -354,7 +354,24 @@ fn model_family(name: &str) -> &'static str {
     }
 }
 
-fn pool_label(names: &[String]) -> String {
+fn pool_window(names: &[String], reset: Option<i64>) -> &'static str {
+    let has_3rd_party = names.iter().any(|n| {
+        let l = n.to_lowercase();
+        l.starts_with("claude") || l.starts_with("gpt")
+    });
+    if has_3rd_party {
+        return "Weekly";
+    }
+    if let Some(r) = reset {
+        let now = Utc::now().timestamp();
+        if r - now > 20000 {
+            return "Weekly";
+        }
+    }
+    "5-hour"
+}
+
+fn pool_label(names: &[String], reset: Option<i64>) -> String {
     let mut fams: Vec<&str> = names.iter().map(|n| model_family(n)).collect();
     fams.sort();
     fams.dedup();
@@ -362,10 +379,11 @@ fn pool_label(names: &[String]) -> String {
         [f] => (*f).to_string(),
         fs => fs.join(" + "),
     };
+    let win = pool_window(names, reset);
     if names.len() > 1 {
-        format!("{fam} pool ×{}", names.len())
+        format!("{fam} ({win}) pool ×{}", names.len())
     } else {
-        fam
+        format!("{fam} ({win})")
     }
 }
 
@@ -539,7 +557,7 @@ async fn collect_antigravity(cfg: &Cfg, client: &reqwest::Client) -> Value {
         .map(|(bits, (names, reset))| {
             let rem = f64::from_bits(bits);
             let pct = ((1.0 - rem) * 100.0).clamp(0.0, 100.0);
-            let label = pool_label(&names);
+            let label = pool_label(&names, reset);
             json!({
                 "label": label,
                 "models": names,
@@ -555,7 +573,7 @@ async fn collect_antigravity(cfg: &Cfg, client: &reqwest::Client) -> Value {
         bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal)
     });
     if !exhausted.is_empty() {
-        let label = pool_label(&exhausted);
+        let label = pool_label(&exhausted, exhausted_reset);
         limits.push(json!({
             "label": format!("{label} — limit hit"),
             "models": exhausted,

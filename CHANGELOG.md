@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.3] - 2026-08-17
+
+### Changed
+
+- Antigravity pool labels now explicitly state the quota cycle window: `(Weekly)` for 3rd-party models (Claude + GPT pool) and `(5-hour)` for Gemini models (e.g. `Claude + GPT (Weekly) pool ×3`, `Gemini (5-hour) pool ×16`).
+
 ## [1.1.2] - 2026-08-16
 
 ### Docs
