@@ -179,7 +179,7 @@ function render(data) {
     const plan = p.plan ? `<span class="plan">${p.plan}</span>` : "";
     const body = p.status === "ok" && p.limits && p.limits.length
       ? p.limits.map(l => limitRow(l, now, p.provider)).join("")
-      : `<div class="errbox">no data</div>`;
+      : `<div class="errbox">${p.error || "no data"}</div>`;
     return `
       <div class="card">
         <h2>${meta.icon} ${p.provider} ${plan} ${badge}</h2>
