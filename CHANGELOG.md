@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.5] - 2026-09-02
+
+### Fixed
+
+- Claude data collection: automatically refresh expired OAuth access tokens via Anthropic's platform token endpoint, persist rotated tokens to credentials file, and properly handle API error states on the dashboard instead of showing blank data.
+
+## [1.1.4] - 2026-08-20
+
+### Changed
+
+- Codex per-model limits (`additional_rate_limits`, e.g. GPT-5.3-Codex-Spark) now report both windows: `(5-hour)` primary and `(Weekly)` secondary, with `window_seconds` included. Previously only the primary window was shown under a `model:<name>` label.
+
 ## [1.1.3] - 2026-08-17
 
 ### Changed

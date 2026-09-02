@@ -1,6 +1,6 @@
 [package]
 name = "aidash"
-version = "0.2.2"
+version = "0.2.4"
 edition = "2021"
 description = "AI usage dashboard for z.ai, Claude, Codex, Antigravity"
 

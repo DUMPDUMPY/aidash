@@ -9,6 +9,7 @@ use tokio::sync::RwLock;
 
 const HTML: &str = include_str!("../index.html");
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const ZAI_UA: &str = "aidash/0.1";
 const CLAUDE_UA: &str = "claude-code/1.0.0";
 // Antigravity (Windsurf-fork) talks to Gemini Cloud Code internal API.
@@ -121,36 +122,148 @@ fn claude_ts(v: &Value) -> Option<f64> {
     chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.timestamp() as f64)
 }
 
-async fn collect_claude(cfg: &Cfg, client: &reqwest::Client) -> Value {
-    let cred = match read_file(&cfg.claude_cred_file) {
-        Ok(c) => c,
-        Err(e) => return json!({"provider":"claude","status":"error","error":e}),
-    };
-    let token = match serde_json::from_str::<Value>(&cred) {
-        Ok(v) => v
-            .pointer("/claudeAiOauth/accessToken")
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
-            .to_string(),
-        Err(e) => return json!({"provider":"claude","status":"error","error":format!("parse creds: {e}")}),
-    };
-    if token.is_empty() {
-        return json!({"provider":"claude","status":"error","error":"no access token"});
-    }
+async fn claude_get(client: &reqwest::Client, token: &str) -> Result<(u16, String), String> {
     let resp = client
         .get("https://api.anthropic.com/api/oauth/usage")
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .header(header::USER_AGENT, CLAUDE_UA)
         .send()
-        .await;
-    let body = match resp {
-        Ok(r) => r.text().await.unwrap_or_default(),
-        Err(e) => return json!({"provider":"claude","status":"error","error":e.to_string()}),
+        .await
+        .map_err(|e| format!("send: {e}"))?;
+    let status = resp.status().as_u16();
+    let body = resp.text().await.map_err(|e| format!("read body: {e}"))?;
+    Ok((status, body))
+}
+
+async fn claude_refresh(client: &reqwest::Client, refresh: &str) -> Result<(String, String, Option<f64>, Option<f64>), String> {
+    let r = client
+        .post("https://platform.claude.com/v1/oauth/token")
+        .header(header::CONTENT_TYPE, "application/json")
+        .json(&json!({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh,
+            "client_id": CLAUDE_CLIENT_ID,
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let body = r.text().await.unwrap_or_default();
+    let v: Value = serde_json::from_str(&body).map_err(|e| format!("refresh parse: {e}"))?;
+    if let Some(err) = v.get("error") {
+        let desc = v.get("error_description").and_then(|d| d.as_str()).unwrap_or("");
+        return Err(format!("{err}: {desc}"));
+    }
+    let at = v.get("access_token").and_then(|t| t.as_str()).ok_or_else(|| format!("refresh failed: {body}"))?.to_string();
+    let rt = v.get("refresh_token").and_then(|t| t.as_str()).unwrap_or(refresh).to_string();
+    let now_ms = Utc::now().timestamp_millis() as f64;
+    let expires_at = v.get("expires_in").and_then(|e| e.as_f64()).map(|s| now_ms + s * 1000.0);
+    let rt_expires_at = v.get("refresh_token_expires_in").and_then(|e| e.as_f64()).map(|s| now_ms + s * 1000.0);
+    Ok((at, rt, expires_at, rt_expires_at))
+}
+
+fn save_claude_creds(
+    path: &PathBuf,
+    mut raw_json: Value,
+    new_at: &str,
+    new_rt: &str,
+    expires_at: Option<f64>,
+    rt_expires_at: Option<f64>,
+) -> Result<(), String> {
+    if let Some(oauth) = raw_json.get_mut("claudeAiOauth").and_then(|o| o.as_object_mut()) {
+        oauth.insert("accessToken".to_string(), json!(new_at));
+        oauth.insert("refreshToken".to_string(), json!(new_rt));
+        if let Some(exp) = expires_at {
+            oauth.insert("expiresAt".to_string(), json!(exp as i64));
+        }
+        if let Some(rt_exp) = rt_expires_at {
+            oauth.insert("refreshTokenExpiresAt".to_string(), json!(rt_exp as i64));
+        }
+    }
+    let s = serde_json::to_string_pretty(&raw_json).map_err(|e| e.to_string())?;
+    std::fs::write(path, s).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+async fn collect_claude(cfg: &Cfg, client: &reqwest::Client) -> Value {
+    let err = |e: String| json!({"provider":"claude","status":"error","error":e});
+    let cred = match read_file(&cfg.claude_cred_file) {
+        Ok(c) => c,
+        Err(e) => return err(e),
     };
-    let v: Value = match serde_json::from_str(&body) {
+    let parsed_cred = match serde_json::from_str::<Value>(&cred) {
         Ok(v) => v,
-        Err(_) => return json!({"provider":"claude","status":"error","error":"bad json"}),
+        Err(e) => return err(format!("parse creds: {e}")),
     };
+    let mut token = parsed_cred
+        .pointer("/claudeAiOauth/accessToken")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    let refresh = parsed_cred
+        .pointer("/claudeAiOauth/refreshToken")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    let plan = parsed_cred
+        .pointer("/claudeAiOauth/subscriptionType")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_uppercase());
+
+    if token.is_empty() && refresh.is_empty() {
+        return err("no access or refresh token found (run `claude` to login)".into());
+    }
+
+    let (mut status, mut body) = if !token.is_empty() {
+        match claude_get(client, &token).await {
+            Ok(x) => x,
+            Err(e) => return err(e),
+        }
+    } else {
+        (401, String::new())
+    };
+
+    let mut parsed: Result<Value, _> = serde_json::from_str(&body);
+    let needs_refresh = status == 401 || status == 403 || status == 429
+        || parsed.as_ref().ok().and_then(|v| v.get("error")).is_some();
+
+    if needs_refresh && !refresh.is_empty() {
+        match claude_refresh(client, &refresh).await {
+            Ok((at, rt, exp, rt_exp)) => {
+                token = at.clone();
+                let _ = save_claude_creds(&cfg.claude_cred_file, parsed_cred.clone(), &at, &rt, exp, rt_exp);
+                match claude_get(client, &token).await {
+                    Ok((s, b)) => {
+                        status = s;
+                        body = b;
+                        parsed = serde_json::from_str(&body);
+                    }
+                    Err(e) => return err(e),
+                }
+            }
+            Err(e) => {
+                if status != 200 {
+                    return err(format!("refresh token failed ({e}) — please re-login via `claude`"));
+                }
+            }
+        }
+    }
+
+    if status != 200 {
+        let snippet: String = body.chars().take(160).collect();
+        return err(format!("http {status}: {snippet}"));
+    }
+
+    let v: Value = match parsed {
+        Ok(v) => v,
+        Err(e) => {
+            let snippet: String = body.chars().take(160).collect();
+            return err(format!("parse: {e}; body: {snippet}"));
+        }
+    };
+
+    if let Some(error_val) = v.get("error") {
+        return err(format!("{error_val}"));
+    }
+
     let mut limits = Vec::new();
     for (key, label) in [("five_hour", "5-hour"), ("seven_day", "7-day")] {
         if let Some(w) = v.get(key) {
@@ -163,7 +276,12 @@ async fn collect_claude(cfg: &Cfg, client: &reqwest::Client) -> Value {
             }));
         }
     }
-    json!({"provider":"claude","status":"ok","plan":null,"limits":limits})
+
+    if limits.is_empty() {
+        return err("no usage limits found in Claude API response".into());
+    }
+
+    json!({"provider":"claude","status":"ok","plan":plan,"limits":limits})
 }
 
 // ---------- Codex ----------
@@ -326,14 +444,24 @@ async fn collect_codex(cfg: &Cfg, client: &reqwest::Client) -> Value {
     if let Some(extra) = v.get("additional_rate_limits").and_then(|a| a.as_array()) {
         for m in extra {
             let name = m.get("limit_name").and_then(|n| n.as_str()).unwrap_or("model");
-            if let Some(pw) = m.pointer("/rate_limit/primary_window") {
-                let pct = pw.get("used_percent").and_then(|p| p.as_f64()).unwrap_or(0.0);
-                limits.push(json!({
-                    "label": format!("model:{name}"),
-                    "used_percent": pct,
-                    "remaining_percent": (100.0 - pct).max(0.0),
-                    "resets_at": pw.get("reset_at"),
-                }));
+            let rl = m.get("rate_limit").cloned().unwrap_or(Value::Null);
+            for (key, fallback) in [("primary_window", "primary"), ("secondary_window", "secondary")] {
+                if let Some(pw) = rl.get(key).filter(|s| !s.is_null()) {
+                    let pct = pw.get("used_percent").and_then(|p| p.as_f64()).unwrap_or(0.0);
+                    let secs = pw.get("limit_window_seconds").and_then(|s| s.as_i64());
+                    let label = match secs {
+                        Some(18000) => format!("{name} (5-hour)"),
+                        Some(604800) => format!("{name} (Weekly)"),
+                        _ => format!("{name} ({fallback})"),
+                    };
+                    limits.push(json!({
+                        "label": label,
+                        "used_percent": pct,
+                        "remaining_percent": (100.0 - pct).max(0.0),
+                        "window_seconds": pw.get("limit_window_seconds"),
+                        "resets_at": pw.get("reset_at"),
+                    }));
+                }
             }
         }
     }
