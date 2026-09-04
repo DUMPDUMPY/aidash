@@ -17,7 +17,7 @@ const CLAUDE_UA: &str = "claude-code/1.0.0";
 const AG_UA: &str = "antigravity/1.0.0 linux/amd64";
 const AG_CLIENT_ID: &str = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
 const AG_CLIENT_SECRET: &str = "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";
-const AG_BASE: &str = "https://cloudcode-pa.googleapis.com";
+const AG_BASE: &str = "https://daily-cloudcode-pa.googleapis.com";
 
 #[derive(Clone)]
 struct Cfg {
