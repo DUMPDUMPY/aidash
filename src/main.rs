@@ -483,20 +483,23 @@ fn model_family(name: &str) -> &'static str {
 }
 
 fn pool_window(names: &[String], reset: Option<i64>) -> &'static str {
+    if let Some(r) = reset {
+        let now = Utc::now().timestamp();
+        if r - now > 20000 {
+            return "Weekly";
+        } else {
+            return "5-hour";
+        }
+    }
     let has_3rd_party = names.iter().any(|n| {
         let l = n.to_lowercase();
         l.starts_with("claude") || l.starts_with("gpt")
     });
     if has_3rd_party {
-        return "Weekly";
+        "5-hour"
+    } else {
+        "Weekly"
     }
-    if let Some(r) = reset {
-        let now = Utc::now().timestamp();
-        if r - now > 20000 {
-            return "Weekly";
-        }
-    }
-    "5-hour"
 }
 
 fn pool_label(names: &[String], reset: Option<i64>) -> String {
@@ -631,92 +634,200 @@ async fn collect_antigravity(cfg: &Cfg, client: &reqwest::Client) -> Value {
         }
     }
 
-    // models map -> group by quota pool: identical remainingFraction = shared pool.
-    // resetTime is reported inconsistently by the API (sometimes cached/omitted),
-    // so take any non-null reset present in the group instead of splitting on it.
-    let mut pools: std::collections::HashMap<u64, (Vec<String>, Option<i64>)> =
-        std::collections::HashMap::new();
-    let mut unknown: Vec<String> = Vec::new();
-    let mut exhausted: Vec<String> = Vec::new();
-    let mut exhausted_reset: Option<i64> = None;
+    // Extract models grouped by family from fetchAvailableModels
+    let mut gemini_models = Vec::new();
+    let mut claude_gpt_models = Vec::new();
+    let mut other_models = Vec::new();
     if let Some(models) = mv.get("models").and_then(|m| m.as_object()) {
         for (name, info) in models {
             if info.get("displayName").and_then(|d| d.as_str()).map_or(true, |d| d.is_empty()) {
                 continue; // skip internal/unnamed entries (chat_*, tab_*)
             }
-            let qi = match info.get("quotaInfo") {
-                Some(q) if !q.is_null() => q,
-                _ => {
-                    unknown.push(name.clone());
-                    continue;
-                }
-            };
-            // quotaInfo present but remainingFraction null = pool exhausted (5hr limit hit);
-            // resetTime still tells when it comes back.
-            let rem = match qi.get("remainingFraction").and_then(|f| f.as_f64()) {
-                Some(r) => r,
-                None => {
-                    exhausted.push(name.clone());
-                    let reset = qi
-                        .get("resetTime")
-                        .and_then(|t| t.as_str())
-                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                        .map(|dt| dt.timestamp());
-                    if let Some(r) = reset {
-                        exhausted_reset = Some(r);
-                    }
-                    continue;
-                }
-            };
-            let reset = qi
-                .get("resetTime")
-                .and_then(|t| t.as_str())
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.timestamp());
-            let entry = pools.entry(rem.to_bits()).or_default();
-            entry.0.push(name.clone());
-            if reset.is_some() {
-                entry.1 = reset;
+            let fam = model_family(name);
+            if fam == "Gemini" {
+                gemini_models.push(name.clone());
+            } else if fam == "Claude" || fam == "GPT" {
+                claude_gpt_models.push(name.clone());
+            } else {
+                other_models.push(name.clone());
             }
         }
     }
-    let mut limits: Vec<Value> = pools
-        .into_iter()
-        .map(|(bits, (names, reset))| {
-            let rem = f64::from_bits(bits);
-            let pct = ((1.0 - rem) * 100.0).clamp(0.0, 100.0);
-            let label = pool_label(&names, reset);
-            json!({
-                "label": label,
-                "models": names,
-                "used_percent": pct,
-                "remaining_percent": (100.0 - pct).max(0.0),
-                "resets_at": reset.map(|r| r as f64),
-            })
-        })
-        .collect();
-    limits.sort_by(|a, b| {
-        let av = a.get("used_percent").and_then(|x| x.as_f64()).unwrap_or(0.0);
-        let bv = b.get("used_percent").and_then(|x| x.as_f64()).unwrap_or(0.0);
-        bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    if !exhausted.is_empty() {
-        let label = pool_label(&exhausted, exhausted_reset);
-        limits.push(json!({
-            "label": format!("{label} — limit hit"),
-            "models": exhausted,
-            "used_percent": 100.0,
-            "remaining_percent": 0.0,
-            "resets_at": exhausted_reset.map(|r| r as f64),
-        }));
+    gemini_models.sort();
+    claude_gpt_models.sort();
+    other_models.sort();
+
+    let mut limits: Vec<Value> = Vec::new();
+
+    // Prefer retrieveUserQuotaSummary: provides per-window 5h and weekly quota buckets
+    if let Ok((qs, qb)) = ag_post(client, "/v1internal:retrieveUserQuotaSummary", &token, "{}").await {
+        if qs == 200 {
+            if let Ok(qv) = serde_json::from_str::<Value>(&qb) {
+                if let Some(groups) = qv.get("groups").and_then(|g| g.as_array()) {
+                    let mut sorted_groups = groups.clone();
+                    sorted_groups.sort_by_key(|g| {
+                        let name = g.get("displayName").and_then(|d| d.as_str()).unwrap_or("").to_lowercase();
+                        if name.contains("gemini") {
+                            0
+                        } else if name.contains("claude") || name.contains("gpt") {
+                            1
+                        } else {
+                            2
+                        }
+                    });
+
+                    for group in sorted_groups {
+                        let gname = group.get("displayName").and_then(|d| d.as_str()).unwrap_or("");
+                        let gname_lower = gname.to_lowercase();
+
+                        let (fam, gmodels) = if gname_lower.contains("gemini") {
+                            ("Gemini", &gemini_models)
+                        } else if gname_lower.contains("claude") || gname_lower.contains("gpt") {
+                            ("Claude + GPT", &claude_gpt_models)
+                        } else {
+                            (gname, &other_models)
+                        };
+
+                        if let Some(buckets) = group.get("buckets").and_then(|b| b.as_array()) {
+                            let mut sorted_buckets = buckets.clone();
+                            sorted_buckets.sort_by_key(|b| {
+                                let w = b.get("window").and_then(|w| w.as_str()).unwrap_or("");
+                                match w {
+                                    "5h" => 0,
+                                    "weekly" => 1,
+                                    _ => 2,
+                                }
+                            });
+
+                            for b in sorted_buckets {
+                                let window = b.get("window").and_then(|w| w.as_str()).unwrap_or("");
+                                let (win_label, win_secs) = match window {
+                                    "5h" => ("5-hour", Some(18000)),
+                                    "weekly" => ("Weekly", Some(604800)),
+                                    _ => (window, None),
+                                };
+
+                                let label = if gmodels.len() > 1 {
+                                    format!("{fam} ({win_label}) pool ×{}", gmodels.len())
+                                } else {
+                                    format!("{fam} ({win_label})")
+                                };
+
+                                let rem_opt = b.get("remainingFraction").and_then(|f| f.as_f64());
+                                let (pct, rem_pct) = match rem_opt {
+                                    Some(rem) => {
+                                        let p = ((1.0 - rem) * 100.0).clamp(0.0, 100.0);
+                                        (p, (100.0 - p).max(0.0))
+                                    }
+                                    None => (100.0, 0.0),
+                                };
+
+                                let resets_at = b
+                                    .get("resetTime")
+                                    .and_then(|t| t.as_str())
+                                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                                    .map(|dt| dt.timestamp() as f64);
+
+                                limits.push(json!({
+                                    "label": label,
+                                    "models": gmodels,
+                                    "used_percent": pct,
+                                    "remaining_percent": rem_pct,
+                                    "resets_at": resets_at,
+                                    "window_seconds": win_secs,
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
-    if !unknown.is_empty() {
-        limits.push(json!({
-            "label": format!("no quota data ×{}", unknown.len()),
-            "models": unknown,
-            "unknown": true,
-            "used_percent": null,
-        }));
+
+    // Fallback: group by remainingFraction from fetchAvailableModels if retrieveUserQuotaSummary failed
+    if limits.is_empty() {
+        let mut pools: std::collections::HashMap<u64, (Vec<String>, Option<i64>)> =
+            std::collections::HashMap::new();
+        let mut unknown: Vec<String> = Vec::new();
+        let mut exhausted: Vec<String> = Vec::new();
+        let mut exhausted_reset: Option<i64> = None;
+        if let Some(models) = mv.get("models").and_then(|m| m.as_object()) {
+            for (name, info) in models {
+                if info.get("displayName").and_then(|d| d.as_str()).map_or(true, |d| d.is_empty()) {
+                    continue; // skip internal/unnamed entries (chat_*, tab_*)
+                }
+                let qi = match info.get("quotaInfo") {
+                    Some(q) if !q.is_null() => q,
+                    _ => {
+                        unknown.push(name.clone());
+                        continue;
+                    }
+                };
+                let rem = match qi.get("remainingFraction").and_then(|f| f.as_f64()) {
+                    Some(r) => r,
+                    None => {
+                        exhausted.push(name.clone());
+                        let reset = qi
+                            .get("resetTime")
+                            .and_then(|t| t.as_str())
+                            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                            .map(|dt| dt.timestamp());
+                        if let Some(r) = reset {
+                            exhausted_reset = Some(r);
+                        }
+                        continue;
+                    }
+                };
+                let reset = qi
+                    .get("resetTime")
+                    .and_then(|t| t.as_str())
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.timestamp());
+                let entry = pools.entry(rem.to_bits()).or_default();
+                entry.0.push(name.clone());
+                if reset.is_some() {
+                    entry.1 = reset;
+                }
+            }
+        }
+        limits = pools
+            .into_iter()
+            .map(|(bits, (names, reset))| {
+                let rem = f64::from_bits(bits);
+                let pct = ((1.0 - rem) * 100.0).clamp(0.0, 100.0);
+                let label = pool_label(&names, reset);
+                json!({
+                    "label": label,
+                    "models": names,
+                    "used_percent": pct,
+                    "remaining_percent": (100.0 - pct).max(0.0),
+                    "resets_at": reset.map(|r| r as f64),
+                })
+            })
+            .collect();
+        limits.sort_by(|a, b| {
+            let av = a.get("used_percent").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let bv = b.get("used_percent").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if !exhausted.is_empty() {
+            let label = pool_label(&exhausted, exhausted_reset);
+            limits.push(json!({
+                "label": format!("{label} — limit hit"),
+                "models": exhausted,
+                "used_percent": 100.0,
+                "remaining_percent": 0.0,
+                "resets_at": exhausted_reset.map(|r| r as f64),
+            }));
+        }
+        if !unknown.is_empty() {
+            limits.push(json!({
+                "label": format!("no quota data ×{}", unknown.len()),
+                "models": unknown,
+                "unknown": true,
+                "used_percent": null,
+            }));
+        }
     }
     if limits.is_empty() {
         return err("no models with quota returned".into());
