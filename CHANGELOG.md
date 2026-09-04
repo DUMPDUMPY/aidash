@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Antigravity API base URL: point `AG_BASE` to `https://daily-cloudcode-pa.googleapis.com` (matching the Antigravity CLI binary environment). Previously it connected to production `cloudcode-pa.googleapis.com` which tracked a separate/stale quota bucket for the same account.
 - Antigravity quota collection: integrate `/v1internal:retrieveUserQuotaSummary` to report dual-window quotas (`(5-hour)` and `(Weekly)`) for both Gemini and 3rd-party (Claude + GPT) pools. Previously, `fetchAvailableModels` only exposed the weekly window for Gemini, causing the dashboard to show 100% exhaustion even when the 5-hour quota had reset.
 - Fixed `pool_window` to determine cycle window from `resets_at` timestamp rather than hardcoded model family.
 
