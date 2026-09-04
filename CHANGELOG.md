@@ -2,7 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.1.5] - 2026-09-02
+## [1.1.6] - 2026-09-04
+
+### Fixed
+
+- Antigravity quota collection: integrate `/v1internal:retrieveUserQuotaSummary` to report dual-window quotas (`(5-hour)` and `(Weekly)`) for both Gemini and 3rd-party (Claude + GPT) pools. Previously, `fetchAvailableModels` only exposed the weekly window for Gemini, causing the dashboard to show 100% exhaustion even when the 5-hour quota had reset.
+- Fixed `pool_window` to determine cycle window from `resets_at` timestamp rather than hardcoded model family.
 
 ### Fixed
 
