@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] - 2026-09-14
+
+### Added
+
+- **OpenCode Go provider**: quota monitoring via `GET https://opencode.ai/zen/go/v1/usage` with Bearer API-key auth, covering all three usage windows: `5-hour` (rolling), `Weekly`, and `Monthly`, each with used percent and reset countdown.
+- API key is read from a plain text file (default `$HOME/aidash/opencode-go.key`, perm 0600; override with `OPENCODE_GO_KEY_FILE`). The key is sent as `Authorization: Bearer <key>` — passive read-only usage endpoint, does not consume quota.
+- Dashboard card 🏃 opencode-go (cyan) with the standard bars, sparklines, and reset countdowns.
+
+### Docs
+
+- README/AGENTES.md: OpenCode Go added to provider list, env defaults, required credentials, and `/data.json` example.
+
 ## [1.1.6] - 2026-09-04
 
 ### Fixed

@@ -6,7 +6,7 @@ This repository is `aidash`, a Rust + Axum dashboard that polls multiple AI usag
 
 ## Purpose
 
-- Aggregate usage data from z.ai, Claude, Codex, and Antigravity.
+- Aggregate usage data from z.ai, OpenCode Go, Claude, Codex, and Antigravity.
 - Keep data in memory and provide:
   - latest snapshot at `/data.json`
   - short history at `/history.json`
@@ -27,6 +27,7 @@ This repository is `aidash`, a Rust + Axum dashboard that polls multiple AI usag
 Set these before running.
 
 - `ZAI_KEY_FILE` (default `$HOME/aidash/zai.key`)
+- `OPENCODE_GO_KEY_FILE` (default `$HOME/aidash/opencode-go.key`)
 - `CLAUDE_CRED_FILE` (default `$HOME/.claude/.credentials.json`)
 - `CODEX_AUTH_FILE` (default `$HOME/.codex/auth.json`)
 - `ANTIGRAVITY_TOKEN_FILE` (default `$HOME/.gemini/antigravity-cli/antigravity-oauth-token`)
