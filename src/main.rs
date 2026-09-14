@@ -22,6 +22,7 @@ const AG_BASE: &str = "https://daily-cloudcode-pa.googleapis.com";
 #[derive(Clone)]
 struct Cfg {
     zai_key_file: PathBuf,
+    opencode_go_key_file: PathBuf,
     claude_cred_file: PathBuf,
     codex_auth_file: PathBuf,
     antigravity_token_file: PathBuf,
@@ -42,6 +43,9 @@ impl Cfg {
         let home = env::var("HOME").unwrap_or_else(|_| "/root".into());
         Self {
             zai_key_file: PathBuf::from(env::var("ZAI_KEY_FILE").unwrap_or_else(|_| format!("{home}/aidash/zai.key"))),
+            opencode_go_key_file: PathBuf::from(
+                env::var("OPENCODE_GO_KEY_FILE").unwrap_or_else(|_| format!("{home}/aidash/opencode-go.key")),
+            ),
             claude_cred_file: PathBuf::from(
                 env::var("CLAUDE_CRED_FILE").unwrap_or_else(|_| format!("{home}/.claude/.credentials.json")),
             ),
@@ -113,6 +117,65 @@ async fn collect_zai(cfg: &Cfg, client: &reqwest::Client) -> Value {
         })
         .collect();
     json!({"provider":"z.ai","status":"ok","plan":level,"limits":out})
+}
+
+// ---------- OpenCode Go ----------
+async fn collect_opencode_go(cfg: &Cfg, client: &reqwest::Client) -> Value {
+    let err = |e: String| json!({"provider":"opencode-go","status":"error","error":e});
+    let key = match read_file(&cfg.opencode_go_key_file) {
+        Ok(k) => k.trim().to_string(),
+        Err(e) => return err(e),
+    };
+    if key.is_empty() {
+        return err("key file empty".into());
+    }
+    let resp = client
+        .get("https://opencode.ai/zen/go/v1/usage")
+        .header(header::AUTHORIZATION, format!("Bearer {key}"))
+        .header(header::ACCEPT, "application/json")
+        .header(header::USER_AGENT, ZAI_UA)
+        .send()
+        .await;
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) => return err(e.to_string()),
+    };
+    let status = resp.status().as_u16();
+    let body = match resp.text().await {
+        Ok(b) => b,
+        Err(e) => return err(format!("read body: {e}")),
+    };
+    if status != 200 {
+        let snippet: String = body.chars().take(160).collect();
+        return err(format!("http {status}: {snippet}"));
+    }
+    let v: Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => return err("bad json".into()),
+    };
+    let mut limits = Vec::new();
+    for (key, label) in [("rolling", "5-hour"), ("weekly", "Weekly"), ("monthly", "Monthly")] {
+        let w = match v.pointer(&format!("/usage/{key}")) {
+            Some(w) if !w.is_null() => w,
+            _ => continue,
+        };
+        let pct = w.get("percent").and_then(|p| p.as_f64()).unwrap_or(0.0);
+        let resets_at = w
+            .get("resetsAt")
+            .and_then(|t| t.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.timestamp() as f64);
+        limits.push(json!({
+            "label": label,
+            "used_percent": pct,
+            "remaining_percent": (100.0 - pct).max(0.0),
+            "resets_at": resets_at,
+        }));
+    }
+    if limits.is_empty() {
+        return err("no usage windows found in response".into());
+    }
+    json!({"provider":"opencode-go","status":"ok","plan":"Go","limits":limits})
 }
 
 // ---------- Claude ----------
@@ -837,13 +900,14 @@ async fn collect_antigravity(cfg: &Cfg, client: &reqwest::Client) -> Value {
 
 // ---------- aggregate ----------
 async fn collect_all(state: &AppState) -> Value {
-    let (zai, claude, codex, antigravity) = tokio::join!(
+    let (zai, opencode_go, claude, codex, antigravity) = tokio::join!(
         collect_zai(&state.cfg, &state.client),
+        collect_opencode_go(&state.cfg, &state.client),
         collect_claude(&state.cfg, &state.client),
         collect_codex(&state.cfg, &state.client),
         collect_antigravity(&state.cfg, &state.client)
     );
-    let providers = vec![zai, claude, codex, antigravity];
+    let providers = vec![zai, opencode_go, claude, codex, antigravity];
     let any_error = providers.iter().any(|p| !is_ok_status(p));
     json!({
         "collected": Utc::now().to_rfc3339(),

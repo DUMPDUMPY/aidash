@@ -5,7 +5,7 @@ An on-machine dashboard that pulls usage/credit usage data from multiple AI prov
 - Backend: `Rust + Axum`
 - Frontend: `index.html` embedded in binary via `include_str!`
 - Storage: in-memory snapshot buffer (no database)
-- Providers: **z.ai**, **Claude**, **Codex**, **Antigravity**
+- Providers: **z.ai**, **OpenCode Go**, **Claude**, **Codex**, **Antigravity**
 
 ---
 
@@ -18,6 +18,13 @@ An on-machine dashboard that pulls usage/credit usage data from multiple AI prov
   - `GET /history.json` for historical snapshots used by sparkline charts
 - First snapshot is collected on startup, then refreshed by a background loop
 - `tmux` control script (`ctl.sh`) for convenient process control
+
+### OpenCode Go
+
+- Reads a Bearer API key from a plain text file (default `$HOME/aidash/opencode-go.key`; override with `OPENCODE_GO_KEY_FILE`)
+- Queries `https://opencode.ai/zen/go/v1/usage` and reports all three usage windows: **5-hour** (rolling), **Weekly**, **Monthly** with reset countdowns
+- Passive read-only usage endpoint — polling does not consume quota
+- Plan badge shows `Go`
 
 ### Antigravity (Google)
 
@@ -90,6 +97,7 @@ Defaults in code:
 - `AIDASH_LISTEN`: `0.0.0.0:8000`
 - `AIDASH_INTERVAL`: `300` (seconds)
 - `ZAI_KEY_FILE`: `$HOME/aidash/zai.key`
+- `OPENCODE_GO_KEY_FILE`: `$HOME/aidash/opencode-go.key`
 - `CLAUDE_CRED_FILE`: `$HOME/.claude/.credentials.json`
 - `CODEX_AUTH_FILE`: `$HOME/.codex/auth.json`
 - `ANTIGRAVITY_TOKEN_FILE`: `$HOME/.gemini/antigravity-cli/antigravity-oauth-token`
@@ -177,6 +185,7 @@ Array of snapshots, each containing trimmed provider usage points for sparkline 
 ## Required credentials
 
 - z.ai: token text file (path from `ZAI_KEY_FILE`)
+- OpenCode Go: API key text file (path from `OPENCODE_GO_KEY_FILE`; from `opencode auth login -p opencode-go` or the OpenCode Go console)
 - Claude: JSON file with `claudeAiOauth.accessToken` under the `CLAUDE_CRED_FILE`
 - Codex: JSON file with:
   - `tokens.access_token`
