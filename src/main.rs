@@ -698,21 +698,48 @@ async fn collect_antigravity(cfg: &Cfg, client: &reqwest::Client) -> Value {
     }
 
     // Extract models grouped by family from fetchAvailableModels
+    // deprecatedModelIds maps old model ids to replacements (e.g. gemini-3.1-pro-high ->
+    // gemini-pro-agent are the same model); canonicalize and dedup so pools count real models
+    let mut deprec_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if let Some(dep) = mv.get("deprecatedModelIds").and_then(|d| d.as_object()) {
+        for (old, info) in dep {
+            if let Some(new_id) = info.get("newModelId").and_then(|n| n.as_str()) {
+                deprec_map.insert(old.clone(), new_id.to_string());
+            }
+        }
+    }
+    let canonical = |id: &str| -> String {
+        let mut cur = id.to_string();
+        for _ in 0..5 {
+            match deprec_map.get(&cur) {
+                Some(next) => cur = next.clone(),
+                None => break,
+            }
+        }
+        cur
+    };
     let mut gemini_models = Vec::new();
     let mut claude_gpt_models = Vec::new();
     let mut other_models = Vec::new();
     if let Some(models) = mv.get("models").and_then(|m| m.as_object()) {
         for (name, info) in models {
             if info.get("displayName").and_then(|d| d.as_str()).map_or(true, |d| d.is_empty()) {
-                continue; // skip internal/unnamed entries (chat_*, tab_*)
+                continue; // skip internal/unnamed entries (chat_*, tab_*, *_tiered)
             }
-            let fam = model_family(name);
+            let cname = canonical(name);
+            let fam = model_family(&cname);
             if fam == "Gemini" {
-                gemini_models.push(name.clone());
+                if !gemini_models.contains(&cname) {
+                    gemini_models.push(cname);
+                }
             } else if fam == "Claude" || fam == "GPT" {
-                claude_gpt_models.push(name.clone());
+                if !claude_gpt_models.contains(&cname) {
+                    claude_gpt_models.push(cname);
+                }
             } else {
-                other_models.push(name.clone());
+                if !other_models.contains(&cname) {
+                    other_models.push(cname);
+                }
             }
         }
     }
@@ -817,8 +844,9 @@ async fn collect_antigravity(cfg: &Cfg, client: &reqwest::Client) -> Value {
         if let Some(models) = mv.get("models").and_then(|m| m.as_object()) {
             for (name, info) in models {
                 if info.get("displayName").and_then(|d| d.as_str()).map_or(true, |d| d.is_empty()) {
-                    continue; // skip internal/unnamed entries (chat_*, tab_*)
+                    continue; // skip internal/unnamed entries (chat_*, tab_*, *_tiered)
                 }
+                let name = canonical(name);
                 let qi = match info.get("quotaInfo") {
                     Some(q) if !q.is_null() => q,
                     _ => {
