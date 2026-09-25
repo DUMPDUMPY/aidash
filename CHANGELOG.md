@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.1] - 2026-09-25
+
+### Fixed
+
+- Antigravity pools: dedup deprecated model aliases using the API's `deprecatedModelIds` map (e.g. `gemini-3.1-pro-high` → `gemini-pro-agent`). Aliased models previously inflated the pool count (Gemini pool ×17 → ×16) while sharing one underlying model. Applied to both the primary path (`retrieveUserQuotaSummary` pool lists) and the fallback path (`fetchAvailableModels` remainingFraction grouping), with deprecation-chain resolution (up to 5 hops).
+
 ## [1.2.0] - 2026-09-14
 
 ### Added

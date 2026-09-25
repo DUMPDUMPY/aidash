@@ -31,6 +31,8 @@ An on-machine dashboard that pulls usage/credit usage data from multiple AI prov
 - Reads the local OAuth token from `~/.gemini/antigravity-cli/antigravity-oauth-token` (created by the `agy` CLI / Antigravity IDE login)
 - Queries the Gemini Cloud Code internal API (`cloudcode-pa.googleapis.com`) for per-model quota
 - Models sharing a quota pool (identical `remainingFraction`) collapse into one row (e.g. *Gemini pool ×16*); click to expand the model list
+- Deprecated model aliases (from the API's `deprecatedModelIds`, e.g. `gemini-3.1-pro-high` → `gemini-pro-agent`) are merged so pools count real models, not aliases
+- New models appear automatically — the model list is read dynamically from the API, never hardcoded; unnamed internal entries (`chat_*`, `tab_*`, `*_tiered`) are skipped
 - A pool that hit its 5-hour limit shows as **100% — limit hit** with reset countdown
 - Models with no quota data yet are grouped into a grey *no quota data* row
 - Plan/tier badge (e.g. `g1-pro-tier`) via `loadCodeAssist`
@@ -157,8 +159,8 @@ AIDASH_INTERVAL=120 AIDASH_LISTEN=127.0.0.1:9000 ./ctl.sh start
       "plan": "g1-pro-tier",
       "limits": [
         {
-          "label": "Gemini pool ×16",
-          "models": ["gemini-3.6-flash-medium", "gemini-3.1-pro-high", "..."],
+          "label": "Gemini (Weekly) pool ×16",
+          "models": ["gemini-3.6-flash-medium", "gemini-pro-agent", "..."],
           "used_percent": 4.5,
           "remaining_percent": 95.5,
           "resets_at": 1786886264
