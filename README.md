@@ -5,7 +5,7 @@ An on-machine dashboard that pulls usage/credit usage data from multiple AI prov
 - Backend: `Rust + Axum`
 - Frontend: `index.html` embedded in binary via `include_str!`
 - Storage: in-memory snapshot buffer (no database)
-- Providers: **z.ai**, **OpenCode Go**, **Claude**, **Codex**, **Antigravity**
+- Providers: **z.ai**, **OpenCode Go**, **Claude**, **Codex**, **Antigravity**, **Muse Code**
 
 ---
 
@@ -38,6 +38,14 @@ An on-machine dashboard that pulls usage/credit usage data from multiple AI prov
 - Plan/tier badge (e.g. `g1-pro-tier`) via `loadCodeAssist`
 - Auto-refreshes the OAuth token on 401 (read-only; never writes back to the token file)
 - Override token path with `ANTIGRAVITY_TOKEN_FILE`
+
+### Muse Code (Meta)
+
+- Reads the OAuth device-code token from `providers.meta.access_token` in `~/.config/muse/auth.json` (created by `muse login`; override path with `MUSE_AUTH_PATH`, `$XDG_CONFIG_HOME` is respected)
+- Queries the same endpoint the CLI uses at startup: `POST https://api.meta.ai/muse-code/key` (body `{}`, header `x-api-version: 1.0.0`) and keeps only the `subs_usage` quota block: **5-hour** window (`used_percent`, `window_duration_mins`, `resets_at` in unix seconds) and **Weekly** window
+- Plan badge from `subs_tier_name` (e.g. `Muse Code High Usage`); requires `is_subs_active: true`
+- Meta omits `subs_usage` while the window is idle — an active plan with no quota block shows an empty card (not an error, never an invented 0%)
+- Polling does not consume quota; the minted `api_key` in the response is discarded and never logged
 
 ## UI Page
 
@@ -103,6 +111,7 @@ Defaults in code:
 - `CLAUDE_CRED_FILE`: `$HOME/.claude/.credentials.json`
 - `CODEX_AUTH_FILE`: `$HOME/.codex/auth.json`
 - `ANTIGRAVITY_TOKEN_FILE`: `$HOME/.gemini/antigravity-cli/antigravity-oauth-token`
+- `MUSE_AUTH_PATH`: `$HOME/.config/muse/auth.json` (`$XDG_CONFIG_HOME/muse/auth.json` when set)
 
 ---
 
@@ -173,6 +182,28 @@ AIDASH_INTERVAL=120 AIDASH_LISTEN=127.0.0.1:9000 ./ctl.sh start
           "resets_at": 1786886250
         }
       ]
+    },
+    {
+      "provider": "muse",
+      "status": "ok",
+      "plan": "Muse Code High Usage",
+      "email": "you@example.com",
+      "limits": [
+        {
+          "label": "5-hour",
+          "used_percent": 3.0,
+          "remaining_percent": 97.0,
+          "window_seconds": 18000,
+          "resets_at": 1791090614
+        },
+        {
+          "label": "Weekly",
+          "used_percent": 1.0,
+          "remaining_percent": 99.0,
+          "window_seconds": 604800,
+          "resets_at": 1791158400
+        }
+      ]
     }
   ]
 }
@@ -193,6 +224,7 @@ Array of snapshots, each containing trimmed provider usage points for sparkline 
   - `tokens.access_token`
   - `tokens.refresh_token` (used when access token expires, unless `CODEX_DISABLE_REFRESH=1`)
 - Antigravity: JSON file with `token.access_token` / `token.refresh_token` (path from `ANTIGRAVITY_TOKEN_FILE`; created by `agy` login)
+- Muse Code: JSON file with `providers.meta.access_token` (path from `MUSE_AUTH_PATH`; created by `muse login`). `LLM_...` dashboard keys and `LLM|...` inference keys cannot read this quota (401) — must be the `dca:...` OAuth token.
 
 Never commit these credential files.
 

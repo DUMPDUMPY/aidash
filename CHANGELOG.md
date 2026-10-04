@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2026-10-04
+
+### Added
+
+- **Muse Code provider**: subscription quota via `POST https://api.meta.ai/muse-code/key` (same request the `muse` CLI makes at startup) with the OAuth device-code token from `providers.meta.access_token` in `~/.config/muse/auth.json` (override with `MUSE_AUTH_PATH`). Reports the **5-hour** window (`used_percent`, `window_duration_mins`, `resets_at`) and **Weekly** window from the `subs_usage` block, with plan badge from `subs_tier_name` (e.g. `Muse Code High Usage`). An active plan with no `subs_usage` block (idle window) shows an empty card, never an invented 0%. The minted `api_key` in the response is discarded and never logged. Dashboard card ♾️ muse (pink) with the standard bars, sparklines, and reset countdowns.
+
 ## [1.2.1] - 2026-09-25
 
 ### Fixed
