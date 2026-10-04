@@ -18,6 +18,7 @@ const AG_UA: &str = "antigravity/1.0.0 linux/amd64";
 const AG_CLIENT_ID: &str = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
 const AG_CLIENT_SECRET: &str = "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";
 const AG_BASE: &str = "https://daily-cloudcode-pa.googleapis.com";
+const MUSE_KEY_URL: &str = "https://api.meta.ai/muse-code/key";
 
 #[derive(Clone)]
 struct Cfg {
@@ -26,6 +27,7 @@ struct Cfg {
     claude_cred_file: PathBuf,
     codex_auth_file: PathBuf,
     antigravity_token_file: PathBuf,
+    muse_auth_file: PathBuf,
     listen: String,
     interval: Duration,
 }
@@ -56,6 +58,19 @@ impl Cfg {
                 env::var("ANTIGRAVITY_TOKEN_FILE")
                     .unwrap_or_else(|_| format!("{home}/.gemini/antigravity-cli/antigravity-oauth-token")),
             ),
+            muse_auth_file: {
+                if let Ok(p) = env::var("MUSE_AUTH_PATH") {
+                    PathBuf::from(p)
+                } else if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
+                    if !xdg.is_empty() {
+                        PathBuf::from(format!("{xdg}/muse/auth.json"))
+                    } else {
+                        PathBuf::from(format!("{home}/.config/muse/auth.json"))
+                    }
+                } else {
+                    PathBuf::from(format!("{home}/.config/muse/auth.json"))
+                }
+            },
             listen: env::var("AIDASH_LISTEN").unwrap_or_else(|_| "0.0.0.0:8000".into()),
             interval: Duration::from_secs(
                 env::var("AIDASH_INTERVAL").ok().and_then(|s| s.parse().ok()).unwrap_or(300),
@@ -926,16 +941,129 @@ async fn collect_antigravity(cfg: &Cfg, client: &reqwest::Client) -> Value {
     json!({"provider":"antigravity","status":"ok","plan":plan,"limits":limits})
 }
 
+// ---------- Muse Code (Meta) ----------
+// Same request the `muse` CLI makes at startup to mint its inference key:
+// POST https://api.meta.ai/muse-code/key with the OAuth device-code token
+// (`dca:...`) from providers.meta.access_token in ~/.config/muse/auth.json.
+// Only allowlisted quota fields are parsed; the minted api_key in the response
+// is discarded and never logged, stored, or rendered.
+async fn collect_muse(cfg: &Cfg, client: &reqwest::Client) -> Value {
+    let err = |e: String| json!({"provider":"muse","status":"error","error":e});
+    let raw = match read_file(&cfg.muse_auth_file) {
+        Ok(r) => r,
+        Err(e) => return err(e),
+    };
+    let v: Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => return err(format!("parse auth: {e}")),
+    };
+    let token = v
+        .pointer("/providers/meta/access_token")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    if token.is_empty() {
+        return err("no access token (run `muse login`)".into());
+    }
+    let email = v
+        .pointer("/providers/meta/user_email")
+        .and_then(|e| e.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let resp = client
+        .post(MUSE_KEY_URL)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-api-version", "1.0.0")
+        .header(header::USER_AGENT, ZAI_UA)
+        .body("{}")
+        .send()
+        .await;
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) => return err(e.to_string()),
+    };
+    let status = resp.status().as_u16();
+    let body = match resp.text().await {
+        Ok(b) => b,
+        Err(e) => return err(format!("read body: {e}")),
+    };
+    if status != 200 {
+        let snippet: String = body.chars().take(160).collect();
+        return err(format!("http {status}: {snippet}"));
+    }
+    let v: Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => return err("bad json".into()),
+    };
+    if let Some(error_val) = v.get("error") {
+        return err(format!("{error_val}"));
+    }
+    let plan = v
+        .get("subs_tier_name")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string());
+    let active = v.get("is_subs_active").and_then(|b| b.as_bool()).unwrap_or(false);
+    if !active {
+        return json!({"provider":"muse","status":"error","plan":plan,"email":email,"error":"no active subscription"});
+    }
+    // Meta omits subs_usage while the window is idle — active plan with no
+    // quota block is an empty reading, not an error and never 0% invented.
+    let su = match v.get("subs_usage") {
+        Some(su) if su.is_object() => su,
+        _ => return json!({"provider":"muse","status":"ok","plan":plan,"email":email,"limits":[]}),
+    };
+    let mut limits = Vec::new();
+    if let Some(w) = su.get("window") {
+        if let Some(pct) = w.get("used_percent").and_then(|p| p.as_f64()) {
+            let secs = w
+                .get("window_duration_mins")
+                .and_then(|m| m.as_i64())
+                .map(|m| m * 60);
+            let resets_at = w
+                .get("resets_at")
+                .and_then(|r| r.as_i64().map(|x| x as f64).or_else(|| r.as_f64()));
+            limits.push(json!({
+                "label": "5-hour",
+                "used_percent": pct,
+                "remaining_percent": (100.0 - pct).max(0.0),
+                "window_seconds": secs,
+                "resets_at": resets_at,
+            }));
+        }
+    }
+    if let Some(wk) = su.get("weekly") {
+        if let Some(pct) = wk.get("used_percent").and_then(|p| p.as_f64()) {
+            let resets_at = wk
+                .get("resets_at")
+                .and_then(|r| r.as_i64().map(|x| x as f64).or_else(|| r.as_f64()));
+            limits.push(json!({
+                "label": "Weekly",
+                "used_percent": pct,
+                "remaining_percent": (100.0 - pct).max(0.0),
+                "window_seconds": 604800,
+                "resets_at": resets_at,
+            }));
+        }
+    }
+    if limits.is_empty() {
+        return err("no usage windows found in response".into());
+    }
+    json!({"provider":"muse","status":"ok","plan":plan,"email":email,"limits":limits})
+}
+
 // ---------- aggregate ----------
 async fn collect_all(state: &AppState) -> Value {
-    let (zai, opencode_go, claude, codex, antigravity) = tokio::join!(
+    let (zai, opencode_go, claude, codex, antigravity, muse) = tokio::join!(
         collect_zai(&state.cfg, &state.client),
         collect_opencode_go(&state.cfg, &state.client),
         collect_claude(&state.cfg, &state.client),
         collect_codex(&state.cfg, &state.client),
-        collect_antigravity(&state.cfg, &state.client)
+        collect_antigravity(&state.cfg, &state.client),
+        collect_muse(&state.cfg, &state.client)
     );
-    let providers = vec![zai, opencode_go, claude, codex, antigravity];
+    let providers = vec![zai, opencode_go, claude, codex, antigravity, muse];
     let any_error = providers.iter().any(|p| !is_ok_status(p));
     json!({
         "collected": Utc::now().to_rfc3339(),
