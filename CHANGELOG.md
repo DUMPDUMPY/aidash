@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.1] - 2026-10-16
+
+### Fixed
+
+- **Antigravity provider quota**: restored dual-window quota (`5-hour` and `Weekly`) for Gemini models by pointing default `AG_BASE` to production `https://cloudcode-pa.googleapis.com` (which returns both `Gemini Models` and `Claude and GPT models`). Added `ANTIGRAVITY_BASE_URL` environment variable override.
+- **Antigravity quota fallback**: ensure models not represented in `retrieveUserQuotaSummary` are always collected from `fetchAvailableModels` `quotaInfo` rather than being omitted when 3rd-party models are returned.
+- **Tiered model support**: clean up `-tiered` suffixes (e.g. `gemini-3.8-flash-tiered` → `gemini-3.8-flash`) so latest generation models are properly included in the Gemini quota pool and model list.
+
 ## [1.3.0] - 2026-10-04
 
 ### Added

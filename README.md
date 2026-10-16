@@ -29,15 +29,16 @@ An on-machine dashboard that pulls usage/credit usage data from multiple AI prov
 ### Antigravity (Google)
 
 - Reads the local OAuth token from `~/.gemini/antigravity-cli/antigravity-oauth-token` (created by the `agy` CLI / Antigravity IDE login)
-- Queries the Gemini Cloud Code internal API (`cloudcode-pa.googleapis.com`) for per-model quota
-- Models sharing a quota pool (identical `remainingFraction`) collapse into one row (e.g. *Gemini pool ×16*); click to expand the model list
+- Queries the Gemini Cloud Code internal API (`cloudcode-pa.googleapis.com`) via `/v1internal:retrieveUserQuotaSummary` for dual-window quotas (**5-hour** and **Weekly**) across both Gemini and 3rd-party (Claude + GPT) pools
+- Models sharing a quota pool (identical `remainingFraction`) collapse into one row (e.g. *Gemini pool ×17*); click to expand the model list
 - Deprecated model aliases (from the API's `deprecatedModelIds`, e.g. `gemini-3.1-pro-high` → `gemini-pro-agent`) are merged so pools count real models, not aliases
-- New models appear automatically — the model list is read dynamically from the API, never hardcoded; unnamed internal entries (`chat_*`, `tab_*`, `*_tiered`) are skipped
+- Tiered models (`*-tiered`, e.g. `gemini-3.8-flash-tiered`) are normalized to their clean model name (`gemini-3.8-flash`); unnamed internal entries (`chat_*`, `tab_*`) are skipped
+- Robust quota extraction: any models unrepresented in `retrieveUserQuotaSummary` are automatically extracted from `fetchAvailableModels` `quotaInfo`
 - A pool that hit its 5-hour limit shows as **100% — limit hit** with reset countdown
 - Models with no quota data yet are grouped into a grey *no quota data* row
 - Plan/tier badge (e.g. `g1-pro-tier`) via `loadCodeAssist`
 - Auto-refreshes the OAuth token on 401 (read-only; never writes back to the token file)
-- Override token path with `ANTIGRAVITY_TOKEN_FILE`
+- Override token path with `ANTIGRAVITY_TOKEN_FILE`, API base URL with `ANTIGRAVITY_BASE_URL` (default `https://cloudcode-pa.googleapis.com`)
 
 ### Muse Code (Meta)
 
