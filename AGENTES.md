@@ -31,7 +31,7 @@ Set these before running.
 - `CLAUDE_CRED_FILE` (default `$HOME/.claude/.credentials.json`)
 - `CODEX_AUTH_FILE` (default `$HOME/.codex/auth.json`)
 - `ANTIGRAVITY_TOKEN_FILE` (default `$HOME/.gemini/antigravity-cli/antigravity-oauth-token`)
-- `ANTIGRAVITY_BASE_URL` (optional, default `https://cloudcode-pa.googleapis.com`)
+- `ANTIGRAVITY_BASE_URL` (optional; default tries `https://daily-cloudcode-pa.googleapis.com` first with fallback to `https://cloudcode-pa.googleapis.com`; setting this env pins one base URL)
 - `MUSE_AUTH_PATH` (default `$HOME/.config/muse/auth.json`, `$XDG_CONFIG_HOME/muse/auth.json` when `XDG_CONFIG_HOME` is set)
 - `AIDASH_LISTEN` (default `0.0.0.0:8000`)
 - `AIDASH_INTERVAL` (default `300`, seconds)

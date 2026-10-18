@@ -29,7 +29,8 @@ An on-machine dashboard that pulls usage/credit usage data from multiple AI prov
 ### Antigravity (Google)
 
 - Reads the local OAuth token from `~/.gemini/antigravity-cli/antigravity-oauth-token` (created by the `agy` CLI / Antigravity IDE login)
-- Queries the Gemini Cloud Code internal API (`cloudcode-pa.googleapis.com`) via `/v1internal:retrieveUserQuotaSummary` for dual-window quotas (**5-hour** and **Weekly**) across both Gemini and 3rd-party (Claude + GPT) pools
+- Queries the Gemini Cloud Code internal API via `/v1internal:retrieveUserQuotaSummary` for dual-window quotas (**5-hour** and **Weekly**) across both Gemini and 3rd-party (Claude + GPT) pools
+- Identifies as the Antigravity Hub client (`User-Agent: antigravity/hub/2.9.x`) and hits `daily-cloudcode-pa.googleapis.com` first — the live quota pool the `agy` CLI reads from; a plain `antigravity/<ver>` UA or the prod host alone serves a stale Gemini pool pinned at 100% remaining (refs: steipete/CodexBar#4102, decolua/9router#3891). Falls back to `cloudcode-pa.googleapis.com` on 403/404/5xx
 - Models sharing a quota pool (identical `remainingFraction`) collapse into one row (e.g. *Gemini pool ×17*); click to expand the model list
 - Deprecated model aliases (from the API's `deprecatedModelIds`, e.g. `gemini-3.1-pro-high` → `gemini-pro-agent`) are merged so pools count real models, not aliases
 - Tiered models (`*-tiered`, e.g. `gemini-3.8-flash-tiered`) are normalized to their clean model name (`gemini-3.8-flash`); unnamed internal entries (`chat_*`, `tab_*`) are skipped
@@ -38,7 +39,7 @@ An on-machine dashboard that pulls usage/credit usage data from multiple AI prov
 - Models with no quota data yet are grouped into a grey *no quota data* row
 - Plan/tier badge (e.g. `g1-pro-tier`) via `loadCodeAssist`
 - Auto-refreshes the OAuth token on 401 (read-only; never writes back to the token file)
-- Override token path with `ANTIGRAVITY_TOKEN_FILE`, API base URL with `ANTIGRAVITY_BASE_URL` (default `https://cloudcode-pa.googleapis.com`)
+- Override token path with `ANTIGRAVITY_TOKEN_FILE`, API base URL with `ANTIGRAVITY_BASE_URL` (default: `https://daily-cloudcode-pa.googleapis.com` first, fallback `https://cloudcode-pa.googleapis.com`)
 
 ### Muse Code (Meta)
 

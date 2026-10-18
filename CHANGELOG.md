@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.2] - 2026-10-18
+
+### Fixed
+
+- **Antigravity Gemini quota was stale** — dashboard showed the Gemini pool pinned at 100% remaining / 0% used while the `agy` CLI showed live usage. Root cause: the collector identified as a plain legacy client (`antigravity/1.0.0`) against the prod host (`cloudcode-pa.googleapis.com`), which serves a separate, lagging Gemini quota pool. The Claude + GPT (3p) buckets were identical on both hosts, which masked the bug.
+
+### Changed
+
+- **User-Agent**: `antigravity/hub/2.9.1 linux/amd64` — the server gates on the `antigravity/hub/` prefix and serves the current model list only for version ≥ 2.9 (refs: steipete/CodexBar#4102).
+- **Host strategy**: requests now try `https://daily-cloudcode-pa.googleapis.com` (the live pool the `agy` CLI reads from; refs: decolua/9router#3891) first and fall back to prod on 403/404/5xx. `401` passes through so token refresh still works. `ANTIGRAVITY_BASE_URL` still overrides everything.
+- Model list freshness: `fetchAvailableModels` on the daily + hub UA path returns newer entries (e.g. `gemini-3.8-flash-high` with `displayName`) that prod hid behind an unnamed `-tiered` alias.
+
+### Verified
+
+- Dashboard numbers now match `agy` `/usage` exactly (Gemini weekly 95.98% remaining, reset `2026-10-25T04:05:13Z` = "Refreshes in 166h 57m"; Gemini 5h 88.41% remaining, reset `09:05:13Z` = "3h 57m").
+
 ## [1.3.1] - 2026-10-16
 
 ### Fixed

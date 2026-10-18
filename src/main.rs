@@ -12,12 +12,19 @@ const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const ZAI_UA: &str = "aidash/0.1";
 const CLAUDE_UA: &str = "claude-code/1.0.0";
-// Antigravity (Windsurf-fork) talks to Gemini Cloud Code internal API.
+// Antigravity talks to the Gemini Cloud Code internal API.
 // Server rejects requests without an "antigravity/..." User-Agent (403).
-const AG_UA: &str = "antigravity/1.0.0 linux/amd64";
+// A plain "antigravity/<ver>" UA gets served a stale/legacy quota pool; the
+// live pool (what the agy CLI /usage panel shows) requires the Hub client UA,
+// version >= 2.9 (see steipete/CodexBar#4102).
+const AG_UA: &str = "antigravity/hub/2.9.1 linux/amd64";
 const AG_CLIENT_ID: &str = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
 const AG_CLIENT_SECRET: &str = "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";
 const AG_BASE: &str = "https://cloudcode-pa.googleapis.com";
+// Quota summary / model list on the prod host can lag or pin at 100% remaining;
+// the daily host serves the live numbers the agy CLI itself reads from
+// (see decolua/9router#3891). ag_post tries this first, then falls back.
+const AG_DAILY_BASE: &str = "https://daily-cloudcode-pa.googleapis.com";
 const MUSE_KEY_URL: &str = "https://api.meta.ai/muse-code/key";
 
 #[derive(Clone)]
@@ -603,19 +610,35 @@ async fn ag_post(
     token: &str,
     body: &str,
 ) -> Result<(u16, String), String> {
-    let base = std::env::var("ANTIGRAVITY_BASE_URL").unwrap_or_else(|_| AG_BASE.into());
-    let r = client
-        .post(format!("{base}{path}"))
-        .header(header::AUTHORIZATION, format!("Bearer {token}"))
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(header::USER_AGENT, AG_UA)
-        .body(body.to_string())
-        .send()
-        .await
-        .map_err(|e| format!("send: {e}"))?;
-    let status = r.status().as_u16();
-    let body = r.text().await.map_err(|e| format!("read body: {e}"))?;
-    Ok((status, body))
+    let post = |base: &str| {
+        let url = format!("{base}{path}");
+        async move {
+            let r = client
+                .post(url)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::USER_AGENT, AG_UA)
+                .body(body.to_string())
+                .send()
+                .await
+                .map_err(|e| format!("send: {e}"))?;
+            let status = r.status().as_u16();
+            let body = r.text().await.map_err(|e| format!("read body: {e}"))?;
+            Ok::<(u16, String), String>((status, body))
+        }
+    };
+    if let Ok(explicit) = std::env::var("ANTIGRAVITY_BASE_URL") {
+        return post(&explicit).await;
+    }
+    // Daily host first (live quota pool); fall back to prod on transport
+    // error, 403/404 (host not serving this account/endpoint) or 5xx.
+    // 401 returns as-is so the caller can refresh the token.
+    let res = post(AG_DAILY_BASE).await?;
+    match res.0 {
+        401 | 200 | 201 => Ok(res),
+        403 | 404 | 500..=599 => post(AG_BASE).await,
+        _ => Ok(res),
+    }
 }
 
 async fn ag_refresh(client: &reqwest::Client, refresh: &str) -> Result<String, String> {
