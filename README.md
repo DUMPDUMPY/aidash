@@ -19,6 +19,14 @@ An on-machine dashboard that pulls usage/credit usage data from multiple AI prov
 - First snapshot is collected on startup, then refreshed by a background loop
 - `tmux` control script (`ctl.sh`) for convenient process control
 
+### Claude
+
+- **Direct mode** is the default and preserves the original behavior: read active credentials from `$HOME/.claude/.credentials.json`, query `https://api.anthropic.com/api/oauth/usage`, and show one account with token auto-refresh.
+- Use the **Multi-account · cswap** button to run `claude-swap list --json` and show every managed account's cached usage. Aidash never reads or decrypts cswap credentials. Only selected mode is polled, avoiding duplicate usage requests.
+- Multi-account refresh follows claude-swap's per-account adaptive polling schedule, not aidash's collection interval (120 seconds via `ctl.sh`; binary default 300 seconds). `list --json` can return cached values for several minutes (sometimes around 10 minutes) until cswap's next poll; Direct mode polls on aidash's interval.
+- The mode button only changes which usage view aidash collects; it does not switch Claude Code accounts. Switch accounts separately with `claude-swap switch <number|email>`.
+- `CLAUDE_CRED_FILE` overrides the direct credential path. `CLAUDE_CRED_FILES` supports direct polling of multiple files. `CLAUDE_SWAP_BIN` selects the cswap executable; set it empty to disable multi-account mode.
+
 ### OpenCode Go
 
 - Reads a Bearer API key from a plain text file (default `$HOME/aidash/opencode-go.key`; override with `OPENCODE_GO_KEY_FILE`)
@@ -110,7 +118,9 @@ Defaults in code:
 - `AIDASH_INTERVAL`: `300` (seconds)
 - `ZAI_KEY_FILE`: `$HOME/aidash/zai.key`
 - `OPENCODE_GO_KEY_FILE`: `$HOME/aidash/opencode-go.key`
+- `CLAUDE_CRED_FILES`: comma-separated direct-mode credential files, each optionally `label=path` (takes precedence over `CLAUDE_CRED_FILE`)
 - `CLAUDE_CRED_FILE`: `$HOME/.claude/.credentials.json`
+- `CLAUDE_SWAP_BIN`: `claude-swap` executable path (auto-detected under `$HOME/.local/bin` or `PATH`; empty disables it)
 - `CODEX_AUTH_FILE`: `$HOME/.codex/auth.json`
 - `ANTIGRAVITY_TOKEN_FILE`: `$HOME/.gemini/antigravity-cli/antigravity-oauth-token`
 - `MUSE_AUTH_PATH`: `$HOME/.config/muse/auth.json` (`$XDG_CONFIG_HOME/muse/auth.json` when set)
@@ -153,6 +163,7 @@ AIDASH_INTERVAL=120 AIDASH_LISTEN=127.0.0.1:9000 ./ctl.sh start
   "providers": [
     {
       "provider": "claude",
+      "account": "you@example.com",
       "status": "ok",
       "plan": null,
       "limits": [
@@ -221,7 +232,7 @@ Array of snapshots, each containing trimmed provider usage points for sparkline 
 
 - z.ai: token text file (path from `ZAI_KEY_FILE`)
 - OpenCode Go: API key text file (path from `OPENCODE_GO_KEY_FILE`; from `opencode auth login -p opencode-go` or the OpenCode Go console)
-- Claude: JSON file with `claudeAiOauth.accessToken` under the `CLAUDE_CRED_FILE`
+- Claude: direct mode reads active JSON credential at `CLAUDE_CRED_FILE` (default `$HOME/.claude/.credentials.json`); multi-account mode reads usage from `claude-swap list --json`
 - Codex: JSON file with:
   - `tokens.access_token`
   - `tokens.refresh_token` (used when access token expires, unless `CODEX_DISABLE_REFRESH=1`)

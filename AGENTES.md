@@ -28,7 +28,9 @@ Set these before running.
 
 - `ZAI_KEY_FILE` (default `$HOME/aidash/zai.key`)
 - `OPENCODE_GO_KEY_FILE` (default `$HOME/aidash/opencode-go.key`)
-- `CLAUDE_CRED_FILE` (default `$HOME/.claude/.credentials.json`)
+- `CLAUDE_CRED_FILES` (optional; comma-separated `[label=]path` list for direct mode)
+- `CLAUDE_CRED_FILE` (default `$HOME/.claude/.credentials.json`; direct-mode credential override)
+- `CLAUDE_SWAP_BIN` (optional; path to `claude-swap`; auto-detected under `$HOME/.local/bin` or `PATH`; empty disables it)
 - `CODEX_AUTH_FILE` (default `$HOME/.codex/auth.json`)
 - `ANTIGRAVITY_TOKEN_FILE` (default `$HOME/.gemini/antigravity-cli/antigravity-oauth-token`)
 - `ANTIGRAVITY_BASE_URL` (optional; default tries `https://daily-cloudcode-pa.googleapis.com` first with fallback to `https://cloudcode-pa.googleapis.com`; setting this env pins one base URL)
@@ -67,8 +69,10 @@ Set these before running.
 - All provider objects contain:
   - `provider`
   - `status`
-  - optional `plan`, `email`
+  - optional `plan`, `email`, `account`
   - `limits` array
+- `account` identifies a specific account; Claude defaults to direct one-account mode and can switch to read-only multi-account usage from `claude-swap list --json`. Each account has a separate provider object and history series.
+- Multi-account values follow claude-swap's adaptive per-account cache schedule; aidash's collection interval does not force cswap to poll Anthropic again.
 - Each limit object should include:
   - `label`
   - `used_percent`
@@ -97,4 +101,3 @@ Set these before running.
 - Update `CHANGELOG.md` for user-facing behavior changes.
 - Keep code changes minimal and targeted.
 - Prefer explicit error messages for credential/API response parsing issues.
-

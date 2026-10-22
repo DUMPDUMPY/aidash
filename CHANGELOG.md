@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2026-10-22
+
+### Added
+
+- **Claude view modes**: Direct remains the default and preserves one-account polling with token auto-refresh. A dashboard mode button switches collection to read-only multi-account usage from `claude-swap list --json`; aidash never reads or decrypts cswap credentials. Only selected mode is polled, avoiding duplicate usage requests.
+- The mode button changes the dashboard data source only. Account switching remains a separate `claude-swap switch <number|email>` terminal command. `CLAUDE_SWAP_BIN` selects the executable.
+- Multi-account freshness follows claude-swap's adaptive cache/poll schedule, which may be several minutes; aidash's collection interval does not force an upstream poll.
+- `/history.json` snapshots include `account` so per-account sparklines stay separate.
+
+### Changed
+
+- Claude provider objects may include `account`, `source`, `active`, and `account_number`; dashboard shows the selected direct or claude-swap mode.
+
 ## [1.3.2] - 2026-10-18
 
 ### Fixed

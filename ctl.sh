@@ -23,8 +23,23 @@ cmd_start() {
   fi
   echo "starting $APP in tmux session '$SESSION'..."
   cd "$DIR"
+  # tmux starts sessions from the tmux server's environment, not this shell's.
+  # Forward the relevant variables explicitly so `CLAUDE_CRED_FILES=... ./ctl.sh start`
+  # (and every other provider path override) actually reaches aidash.
+  local envs="" var
+  for var in \
+    PATH HOME XDG_CONFIG_HOME XDG_DATA_HOME \
+    AIDASH_INTERVAL AIDASH_LISTEN \
+    ZAI_KEY_FILE OPENCODE_GO_KEY_FILE \
+    CLAUDE_CRED_FILES CLAUDE_CRED_FILE CLAUDE_SWAP_BIN \
+    CODEX_AUTH_FILE CODEX_DISABLE_REFRESH \
+    ANTIGRAVITY_TOKEN_FILE ANTIGRAVITY_BASE_URL MUSE_AUTH_PATH; do
+    if [ -n "${!var+x}" ]; then
+      envs+="$(printf '%q=%q ' "$var" "${!var}")"
+    fi
+  done
   tmux new-session -d -s "$SESSION" \
-    "AIDASH_INTERVAL=$AIDASH_INTERVAL AIDASH_LISTEN=$AIDASH_LISTEN $BIN 2>&1 | tee $LOGFILE"
+    "unset CLAUDE_CRED_FILES CLAUDE_CRED_FILE CLAUDE_SWAP_BIN; ${envs}${BIN} 2>&1 | tee ${LOGFILE}"
   sleep 1
   if running; then
     echo "started (session: $SESSION) on $AIDASH_LISTEN, interval ${AIDASH_INTERVAL}s"

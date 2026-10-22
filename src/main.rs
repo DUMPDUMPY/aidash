@@ -1,11 +1,17 @@
-use axum::{extract::State, http::header, response::IntoResponse, routing::get, Json, Router};
+use axum::{
+    extract::State,
+    http::{header, StatusCode},
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 const HTML: &str = include_str!("../index.html");
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -28,10 +34,32 @@ const AG_DAILY_BASE: &str = "https://daily-cloudcode-pa.googleapis.com";
 const MUSE_KEY_URL: &str = "https://api.meta.ai/muse-code/key";
 
 #[derive(Clone)]
+struct ClaudeCred {
+    label: Option<String>,
+    path: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClaudeMode {
+    Direct,
+    Multi,
+}
+
+impl ClaudeMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Multi => "multi",
+        }
+    }
+}
+
+#[derive(Clone)]
 struct Cfg {
     zai_key_file: PathBuf,
     opencode_go_key_file: PathBuf,
-    claude_cred_file: PathBuf,
+    claude_creds: Vec<ClaudeCred>,
+    claude_swap_bin: Option<PathBuf>,
     codex_auth_file: PathBuf,
     antigravity_token_file: PathBuf,
     muse_auth_file: PathBuf,
@@ -44,20 +72,95 @@ struct AppState {
     cfg: Cfg,
     data: Arc<RwLock<Value>>,
     history: Arc<RwLock<Vec<Value>>>,
+    claude_mode: Arc<RwLock<ClaudeMode>>,
+    collect_lock: Arc<Mutex<()>>,
     client: reqwest::Client,
+}
+
+// CLAUDE_CRED_FILES accepts comma-separated entries as `path` or
+// `label=path`. Duplicate paths are ignored (they would race on refresh
+// write-back and render duplicate cards).
+fn parse_claude_creds(list: &str) -> Vec<ClaudeCred> {
+    let mut seen = std::collections::HashSet::new();
+    list.split(',')
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                return None;
+            }
+            let (label, path) = match entry.split_once('=') {
+                Some((label, path)) if !label.trim().is_empty() && !path.trim().is_empty() => {
+                    (Some(label.trim().to_string()), path.trim())
+                }
+                _ => (None, entry),
+            };
+            let cred = ClaudeCred {
+                label,
+                path: PathBuf::from(path),
+            };
+            seen.insert(cred.path.clone()).then_some(cred)
+        })
+        .collect()
+}
+
+fn claude_creds_from_env(home: &str) -> (Vec<ClaudeCred>, Option<PathBuf>) {
+    let swap_bin = find_claude_swap(home);
+    if let Ok(list) = env::var("CLAUDE_CRED_FILES") {
+        let creds = parse_claude_creds(&list);
+        if !creds.is_empty() {
+            return (creds, swap_bin);
+        }
+    }
+    if let Ok(path) = env::var("CLAUDE_CRED_FILE") {
+        if !path.trim().is_empty() {
+            return (
+                vec![ClaudeCred {
+                    label: None,
+                    path: PathBuf::from(path.trim()),
+                }],
+                swap_bin,
+            );
+        }
+    }
+    let path = PathBuf::from(format!("{home}/.claude/.credentials.json"));
+    (
+        vec![ClaudeCred { label: None, path }],
+        swap_bin,
+    )
+}
+
+fn find_claude_swap(home: &str) -> Option<PathBuf> {
+    if let Ok(bin) = env::var("CLAUDE_SWAP_BIN") {
+        let bin = bin.trim();
+        // Explicitly empty disables claude-swap discovery.
+        return (!bin.is_empty()).then(|| PathBuf::from(bin));
+    }
+    let local = PathBuf::from(format!("{home}/.local/bin/claude-swap"));
+    if local.is_file() {
+        return Some(local);
+    }
+    if let Some(paths) = env::var_os("PATH") {
+        for dir in env::split_paths(&paths) {
+            let candidate = dir.join("claude-swap");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 impl Cfg {
     fn from_env() -> Self {
         let home = env::var("HOME").unwrap_or_else(|_| "/root".into());
+        let (claude_creds, claude_swap_bin) = claude_creds_from_env(&home);
         Self {
             zai_key_file: PathBuf::from(env::var("ZAI_KEY_FILE").unwrap_or_else(|_| format!("{home}/aidash/zai.key"))),
             opencode_go_key_file: PathBuf::from(
                 env::var("OPENCODE_GO_KEY_FILE").unwrap_or_else(|_| format!("{home}/aidash/opencode-go.key")),
             ),
-            claude_cred_file: PathBuf::from(
-                env::var("CLAUDE_CRED_FILE").unwrap_or_else(|_| format!("{home}/.claude/.credentials.json")),
-            ),
+            claude_creds,
+            claude_swap_bin,
             codex_auth_file: PathBuf::from(
                 env::var("CODEX_AUTH_FILE").unwrap_or_else(|_| format!("{home}/.codex/auth.json")),
             ),
@@ -207,6 +310,54 @@ fn claude_ts(v: &Value) -> Option<f64> {
     chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.timestamp() as f64)
 }
 
+fn claude_cred_email(raw: &Value) -> Option<String> {
+    ["/claudeAiOauth/emailAddress", "/claudeAiOauth/email"]
+        .iter()
+        .find_map(|ptr| raw.pointer(ptr).and_then(|e| e.as_str()))
+        .filter(|e| !e.is_empty())
+        .map(str::to_string)
+}
+
+// Claude Code keeps the account email in `<config-dir>/.claude.json`
+// (`oauthAccount.emailAddress`). The default layout is the exception:
+// `~/.claude/.credentials.json` pairs with `~/.claude.json`.
+fn claude_config_email(cred_path: &Path) -> Option<String> {
+    let file = cred_path.file_name()?.to_str()?;
+    if file != ".credentials.json" && file != "credentials.json" {
+        return None;
+    }
+    let dir = cred_path.parent()?;
+    let mut candidates = vec![dir.join(".claude.json")];
+    if dir.file_name().and_then(|s| s.to_str()) == Some(".claude") {
+        if let Some(home) = dir.parent() {
+            candidates.push(home.join(".claude.json"));
+        }
+    }
+    candidates.iter().find_map(|path| {
+        let raw = std::fs::read_to_string(path).ok()?;
+        let v: Value = serde_json::from_str(&raw).ok()?;
+        v.pointer("/oauthAccount/emailAddress")
+            .and_then(|e| e.as_str())
+            .filter(|e| !e.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn claude_path_label(path: &Path) -> String {
+    let file = path.file_name().and_then(|s| s.to_str()).unwrap_or("account");
+    if file == ".credentials.json" || file == "credentials.json" {
+        path.parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .map(|s| s.trim_start_matches('.'))
+            .filter(|s| !s.is_empty() && *s != "claude")
+            .unwrap_or("account")
+            .to_string()
+    } else {
+        file.strip_suffix(".json").unwrap_or(file).to_string()
+    }
+}
+
 async fn claude_get(client: &reqwest::Client, token: &str) -> Result<(u16, String), String> {
     let resp = client
         .get("https://api.anthropic.com/api/oauth/usage")
@@ -247,7 +398,7 @@ async fn claude_refresh(client: &reqwest::Client, refresh: &str) -> Result<(Stri
 }
 
 fn save_claude_creds(
-    path: &PathBuf,
+    path: &Path,
     mut raw_json: Value,
     new_at: &str,
     new_rt: &str,
@@ -268,16 +419,29 @@ fn save_claude_creds(
     std::fs::write(path, s).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-async fn collect_claude(cfg: &Cfg, client: &reqwest::Client) -> Value {
-    let err = |e: String| json!({"provider":"claude","status":"error","error":e});
-    let cred = match read_file(&cfg.claude_cred_file) {
-        Ok(c) => c,
-        Err(e) => return err(e),
-    };
-    let parsed_cred = match serde_json::from_str::<Value>(&cred) {
-        Ok(v) => v,
-        Err(e) => return err(format!("parse creds: {e}")),
-    };
+async fn collect_claude_account(
+    cred: &ClaudeCred,
+    client: &reqwest::Client,
+) -> (Option<String>, String, Value) {
+    let fallback = claude_path_label(&cred.path);
+    let base_label = cred.label.clone().or_else(|| claude_config_email(&cred.path));
+    match claude_account_usage(cred, client).await {
+        Ok((email, data)) => (cred.label.clone().or(email).or(base_label), fallback, data),
+        Err(e) => (
+            base_label,
+            fallback,
+            json!({"provider":"claude","status":"error","error":e}),
+        ),
+    }
+}
+
+async fn claude_account_usage(
+    cred: &ClaudeCred,
+    client: &reqwest::Client,
+) -> Result<(Option<String>, Value), String> {
+    let raw = read_file(&cred.path)?;
+    let parsed_cred = serde_json::from_str::<Value>(&raw).map_err(|e| format!("parse creds: {e}"))?;
+    let email = claude_cred_email(&parsed_cred);
     let mut token = parsed_cred
         .pointer("/claudeAiOauth/accessToken")
         .and_then(|t| t.as_str())
@@ -294,14 +458,11 @@ async fn collect_claude(cfg: &Cfg, client: &reqwest::Client) -> Value {
         .map(|s| s.to_uppercase());
 
     if token.is_empty() && refresh.is_empty() {
-        return err("no access or refresh token found (run `claude` to login)".into());
+        return Err("no access or refresh token found (run `claude` to login)".into());
     }
 
     let (mut status, mut body) = if !token.is_empty() {
-        match claude_get(client, &token).await {
-            Ok(x) => x,
-            Err(e) => return err(e),
-        }
+        claude_get(client, &token).await?
     } else {
         (401, String::new())
     };
@@ -314,19 +475,19 @@ async fn collect_claude(cfg: &Cfg, client: &reqwest::Client) -> Value {
         match claude_refresh(client, &refresh).await {
             Ok((at, rt, exp, rt_exp)) => {
                 token = at.clone();
-                let _ = save_claude_creds(&cfg.claude_cred_file, parsed_cred.clone(), &at, &rt, exp, rt_exp);
+                let _ = save_claude_creds(&cred.path, parsed_cred.clone(), &at, &rt, exp, rt_exp);
                 match claude_get(client, &token).await {
                     Ok((s, b)) => {
                         status = s;
                         body = b;
                         parsed = serde_json::from_str(&body);
                     }
-                    Err(e) => return err(e),
+                    Err(e) => return Err(e),
                 }
             }
             Err(e) => {
                 if status != 200 {
-                    return err(format!("refresh token failed ({e}) — please re-login via `claude`"));
+                    return Err(format!("refresh token failed ({e}) — please re-login via `claude`"));
                 }
             }
         }
@@ -334,19 +495,19 @@ async fn collect_claude(cfg: &Cfg, client: &reqwest::Client) -> Value {
 
     if status != 200 {
         let snippet: String = body.chars().take(160).collect();
-        return err(format!("http {status}: {snippet}"));
+        return Err(format!("http {status}: {snippet}"));
     }
 
     let v: Value = match parsed {
         Ok(v) => v,
         Err(e) => {
             let snippet: String = body.chars().take(160).collect();
-            return err(format!("parse: {e}; body: {snippet}"));
+            return Err(format!("parse: {e}; body: {snippet}"));
         }
     };
 
     if let Some(error_val) = v.get("error") {
-        return err(format!("{error_val}"));
+        return Err(format!("{error_val}"));
     }
 
     let mut limits = Vec::new();
@@ -363,10 +524,188 @@ async fn collect_claude(cfg: &Cfg, client: &reqwest::Client) -> Value {
     }
 
     if limits.is_empty() {
-        return err("no usage limits found in Claude API response".into());
+        return Err("no usage limits found in Claude API response".into());
     }
 
-    json!({"provider":"claude","status":"ok","plan":plan,"limits":limits})
+    Ok((email, json!({"provider":"claude","status":"ok","plan":plan,"limits":limits})))
+}
+
+// ---------- Claude (claude-swap) ----------
+// Usage-only integration: claude-swap owns the encrypted credentials and its
+// own polling cadence, so aidash never reads tokens and never refreshes them.
+// The JSON schema is documented as additive in the claude-swap README.
+async fn collect_claude_swap(bin: &Path) -> Result<Vec<Value>, String> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::process::Command::new(bin)
+            .args(["list", "--json"])
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| "claude-swap list timed out after 60s".to_string())?
+    .map_err(|e| format!("spawn claude-swap: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let snippet: String = stderr.trim().chars().take(200).collect();
+        return Err(format!("claude-swap list failed: {snippet}"));
+    }
+    let v: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("parse claude-swap json: {e}"))?;
+    claude_swap_providers(&v)
+}
+
+fn claude_swap_providers(v: &Value) -> Result<Vec<Value>, String> {
+    let accounts = v
+        .get("accounts")
+        .and_then(|a| a.as_array())
+        .ok_or_else(|| "claude-swap json has no accounts array".to_string())?;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(accounts.len());
+    for a in accounts {
+        let number = a.get("number").and_then(|n| n.as_i64()).unwrap_or(0);
+        let email = a.get("email").and_then(|e| e.as_str()).unwrap_or("").trim();
+        let base = if email.is_empty() { "account" } else { email };
+        let mut account = base.to_string();
+        if !seen.insert(account.clone()) {
+            account = format!("{base} #{number}");
+            seen.insert(account.clone());
+        }
+        let active = a.get("active").and_then(|b| b.as_bool()).unwrap_or(false);
+        let usage_status = a
+            .get("usageStatus")
+            .and_then(|s| s.as_str())
+            .unwrap_or("unavailable");
+
+        let mut row = json!({
+            "provider": "claude",
+            "account": account,
+            "source": "cswap",
+            "email": email,
+            "account_number": number,
+        });
+        if active {
+            row["active"] = json!(true);
+        }
+
+        if usage_status != "ok" {
+            row["status"] = json!("error");
+            row["error"] = json!(claude_swap_error(a, usage_status));
+            out.push(row);
+            continue;
+        }
+
+        let usage = match a.get("usage").filter(|u| u.is_object()) {
+            Some(u) => u,
+            None => {
+                row["status"] = json!("error");
+                row["error"] = json!("usage ok but no usage windows returned");
+                out.push(row);
+                continue;
+            }
+        };
+        let mut limits = Vec::new();
+        for (key, label) in [("fiveHour", "5-hour"), ("sevenDay", "7-day")] {
+            if let Some(w) = usage.get(key).filter(|w| w.is_object()) {
+                let pct = w.get("pct").and_then(|p| p.as_f64()).unwrap_or(0.0);
+                limits.push(json!({
+                    "label": label,
+                    "used_percent": pct,
+                    "remaining_percent": (100.0 - pct).max(0.0),
+                    "resets_at": w.get("resetsAt").and_then(claude_ts),
+                }));
+            }
+        }
+        if let Some(scoped) = usage.get("scoped").and_then(|s| s.as_array()) {
+            for w in scoped {
+                let name = w.get("name").and_then(|n| n.as_str()).unwrap_or("model");
+                let pct = w.get("pct").and_then(|p| p.as_f64()).unwrap_or(0.0);
+                limits.push(json!({
+                    "label": format!("{name} (7-day)"),
+                    "used_percent": pct,
+                    "remaining_percent": (100.0 - pct).max(0.0),
+                    "resets_at": w.get("resetsAt").and_then(claude_ts),
+                }));
+            }
+        }
+        if limits.is_empty() {
+            row["status"] = json!("error");
+            row["error"] = json!("no usage limits in claude-swap response");
+        } else {
+            row["status"] = json!("ok");
+            row["limits"] = json!(limits);
+        }
+        out.push(row);
+    }
+    Ok(out)
+}
+
+fn claude_swap_error(a: &Value, status: &str) -> String {
+    match status {
+        "unavailable" => a
+            .get("usageError")
+            .and_then(|e| e.as_str())
+            .map(|e| format!("usage unavailable ({e})"))
+            .unwrap_or_else(|| "usage unavailable".into()),
+        "token_expired" => "token expired (cswap will retry)".into(),
+        "api_key" => "API key account — no subscription quota".into(),
+        "keychain_unavailable" => "macOS Keychain unavailable".into(),
+        "relogin_required" => "re-login needed (`cswap add`)".into(),
+        "foreign_credential" => "credential belongs to another account".into(),
+        "no_credentials" => "no credentials stored".into(),
+        other => format!("usage status: {other}"),
+    }
+}
+
+async fn collect_claude(cfg: &Cfg, client: &reqwest::Client, mode: ClaudeMode) -> Vec<Value> {
+    match mode {
+        ClaudeMode::Direct => collect_claude_files(cfg, client).await,
+        ClaudeMode::Multi => {
+            let Some(bin) = &cfg.claude_swap_bin else {
+                return vec![json!({
+                    "provider":"claude",
+                    "status":"error",
+                    "error":"claude-swap not found; set CLAUDE_SWAP_BIN"
+                })];
+            };
+            match collect_claude_swap(bin).await {
+                Ok(accounts) if !accounts.is_empty() => accounts,
+                Ok(_) => vec![json!({
+                    "provider":"claude",
+                    "status":"error",
+                    "error":"claude-swap has no managed accounts"
+                })],
+                Err(e) => vec![json!({
+                    "provider":"claude",
+                    "status":"error",
+                    "error":e
+                })],
+            }
+        }
+    }
+}
+
+async fn collect_claude_files(cfg: &Cfg, client: &reqwest::Client) -> Vec<Value> {
+    let multiple = cfg.claude_creds.len() > 1;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(cfg.claude_creds.len());
+    for (i, cred) in cfg.claude_creds.iter().enumerate() {
+        let (preferred, fallback, mut value) = collect_claude_account(cred, client).await;
+        let label = preferred.or_else(|| multiple.then_some(fallback));
+        if let Some(mut label) = label {
+            if !seen.insert(label.clone()) {
+                label = format!("{label} #{}", i + 1);
+                seen.insert(label.clone());
+            }
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("account".into(), json!(label));
+                obj.insert("source".into(), json!("direct"));
+            }
+        }
+        out.push(value);
+    }
+    out
 }
 
 // ---------- Codex ----------
@@ -1139,21 +1478,25 @@ async fn collect_muse(cfg: &Cfg, client: &reqwest::Client) -> Value {
 }
 
 // ---------- aggregate ----------
-async fn collect_all(state: &AppState) -> Value {
+async fn collect_all(state: &AppState, claude_mode: ClaudeMode) -> Value {
     let (zai, opencode_go, claude, codex, antigravity, muse) = tokio::join!(
         collect_zai(&state.cfg, &state.client),
         collect_opencode_go(&state.cfg, &state.client),
-        collect_claude(&state.cfg, &state.client),
+        collect_claude(&state.cfg, &state.client, claude_mode),
         collect_codex(&state.cfg, &state.client),
         collect_antigravity(&state.cfg, &state.client),
         collect_muse(&state.cfg, &state.client)
     );
-    let providers = vec![zai, opencode_go, claude, codex, antigravity, muse];
+    let mut providers = vec![zai, opencode_go];
+    providers.extend(claude);
+    providers.extend([codex, antigravity, muse]);
     let any_error = providers.iter().any(|p| !is_ok_status(p));
     json!({
         "collected": Utc::now().to_rfc3339(),
         "ts": Utc::now().timestamp(),
         "any_error": any_error,
+        "claude_mode": claude_mode.as_str(),
+        "claude_multi_available": state.cfg.claude_swap_bin.is_some(),
         "providers": providers,
     })
 }
@@ -1161,7 +1504,7 @@ async fn collect_all(state: &AppState) -> Value {
 const HISTORY_LEN: usize = 60;
 
 fn history_snapshot(data: &Value) -> Value {
-    // trim each provider to {provider, limits:[{label,used_percent}]}
+    // trim each provider to {provider, account, limits:[{label,used_percent}]}
     let providers = data
         .get("providers")
         .and_then(|p| p.as_array())
@@ -1184,6 +1527,8 @@ fn history_snapshot(data: &Value) -> Value {
                         .unwrap_or_default();
                     json!({
                         "provider": p.get("provider").and_then(|x| x.as_str()).unwrap_or(""),
+                        "account": p.get("account").and_then(|x| x.as_str()).unwrap_or(""),
+                        "source": p.get("source").and_then(|x| x.as_str()).unwrap_or(""),
                         "limits": limits,
                     })
                 })
@@ -1198,17 +1543,24 @@ fn history_snapshot(data: &Value) -> Value {
 
 async fn background_loop(state: AppState) {
     loop {
-        let data = collect_all(&state).await;
-        {
-            let mut h = state.history.write().await;
-            h.push(history_snapshot(&data));
-            if h.len() > HISTORY_LEN {
-                h.remove(0);
-            }
-        }
-        *state.data.write().await = data;
+        let _guard = state.collect_lock.lock().await;
+        let mode = *state.claude_mode.read().await;
+        let data = collect_all(&state, mode).await;
+        store_snapshot(&state, data).await;
+        drop(_guard);
         tokio::time::sleep(state.cfg.interval).await;
     }
+}
+
+async fn store_snapshot(state: &AppState, data: Value) {
+    {
+        let mut h = state.history.write().await;
+        h.push(history_snapshot(&data));
+        if h.len() > HISTORY_LEN {
+            h.remove(0);
+        }
+    }
+    *state.data.write().await = data;
 }
 
 // ---------- HTTP ----------
@@ -1227,6 +1579,42 @@ async fn history_handler(State(state): State<AppState>) -> Json<Value> {
     Json(json!(state.history.read().await.clone()))
 }
 
+async fn claude_mode_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    let mode = match payload.get("mode").and_then(|m| m.as_str()) {
+        Some("direct") => ClaudeMode::Direct,
+        Some("multi") => ClaudeMode::Multi,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"mode must be 'direct' or 'multi'"})),
+            );
+        }
+    };
+    if mode == ClaudeMode::Multi && state.cfg.claude_swap_bin.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"claude-swap not found; set CLAUDE_SWAP_BIN"})),
+        );
+    }
+
+    let _guard = state.collect_lock.lock().await;
+    *state.claude_mode.write().await = mode;
+    let claude = collect_claude(&state.cfg, &state.client, mode).await;
+    let mut data = state.data.read().await.clone();
+    if let Some(providers) = data.get_mut("providers").and_then(|p| p.as_array_mut()) {
+        providers.retain(|p| p.get("provider").and_then(|v| v.as_str()) != Some("claude"));
+        providers.extend(claude);
+        let any_error = providers.iter().any(|p| !is_ok_status(p));
+        data["any_error"] = json!(any_error);
+    }
+    data["claude_mode"] = json!(mode.as_str());
+    *state.data.write().await = data;
+    (StatusCode::OK, Json(json!({"mode":mode.as_str()})))
+}
+
 #[tokio::main]
 async fn main() {
     let cfg = Cfg::from_env();
@@ -1242,17 +1630,15 @@ async fn main() {
         cfg,
         data,
         history,
+        claude_mode: Arc::new(RwLock::new(ClaudeMode::Direct)),
+        collect_lock: Arc::new(Mutex::new(())),
         client,
     };
 
     // first collect before serving
     let boot_state = state.clone();
-    let boot = collect_all(&boot_state).await;
-    {
-        let mut h = state.history.write().await;
-        h.push(history_snapshot(&boot));
-    }
-    *state.data.write().await = boot;
+    let boot = collect_all(&boot_state, ClaudeMode::Direct).await;
+    store_snapshot(&state, boot).await;
 
     // background refresh
     let bg_state = state.clone();
@@ -1264,9 +1650,92 @@ async fn main() {
         .route("/", get(index))
         .route("/data.json", get(data_handler))
         .route("/history.json", get(history_handler))
+        .route("/claude/mode", post(claude_mode_handler))
         .with_state(state);
 
     eprintln!("aidash listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind");
     axum::serve(listener, app).await.expect("server");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_labelled_claude_creds() {
+        let creds = parse_claude_creds(" personal=/a/.credentials.json , work=/b/.credentials.json ");
+        assert_eq!(creds.len(), 2);
+        assert_eq!(creds[0].label.as_deref(), Some("personal"));
+        assert_eq!(creds[0].path, PathBuf::from("/a/.credentials.json"));
+        assert_eq!(creds[1].label.as_deref(), Some("work"));
+        assert_eq!(creds[1].path, PathBuf::from("/b/.credentials.json"));
+    }
+
+    #[test]
+    fn parses_unlabelled_claude_creds_and_dedupes_paths() {
+        let creds = parse_claude_creds("/a.json,,  ,/b.json,/a.json");
+        assert_eq!(creds.len(), 2);
+        assert!(creds.iter().all(|c| c.label.is_none()));
+        assert_eq!(creds[0].path, PathBuf::from("/a.json"));
+        assert_eq!(creds[1].path, PathBuf::from("/b.json"));
+    }
+
+    #[test]
+    fn derives_claude_account_labels_from_paths() {
+        assert_eq!(
+            claude_path_label(Path::new("/home/me/.claude-work/.credentials.json")),
+            "claude-work"
+        );
+        assert_eq!(
+            claude_path_label(Path::new("/home/me/.claude/.credentials.json")),
+            "account"
+        );
+        assert_eq!(claude_path_label(Path::new("/home/me/work-claude.json")), "work-claude");
+    }
+
+    #[test]
+    fn maps_claude_swap_accounts_to_providers() {
+        let v = json!({
+            "schemaVersion": 1,
+            "activeAccountNumber": 3,
+            "accounts": [
+                {
+                    "number": 2,
+                    "email": "two@example.com",
+                    "active": false,
+                    "usageStatus": "ok",
+                    "usage": {
+                        "fiveHour": { "pct": 19.0, "resetsAt": "2026-10-22T22:50:00.061742+00:00" },
+                        "sevenDay": { "pct": 96.0, "resetsAt": "2026-10-26T20:00:00.061764+00:00" },
+                        "scoped": [
+                            { "name": "Fable", "pct": 0.0, "resetsAt": "2026-10-26T20:00:00+00:00" }
+                        ]
+                    }
+                },
+                {
+                    "number": 3,
+                    "email": "three@example.com",
+                    "active": true,
+                    "usageStatus": "token_expired",
+                    "usage": null
+                }
+            ]
+        });
+        let rows = claude_swap_providers(&v).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["provider"], "claude");
+        assert_eq!(rows[0]["source"], "cswap");
+        assert_eq!(rows[0]["account"], "two@example.com");
+        assert_eq!(rows[0]["status"], "ok");
+        let limits = rows[0]["limits"].as_array().unwrap();
+        assert_eq!(limits.len(), 3);
+        assert_eq!(limits[0]["label"], "5-hour");
+        assert_eq!(limits[0]["used_percent"], 19.0);
+        assert!(limits[0]["resets_at"].as_f64().is_some());
+        assert_eq!(limits[2]["label"], "Fable (7-day)");
+        assert_eq!(rows[1]["status"], "error");
+        assert_eq!(rows[1]["active"], true);
+        assert!(rows[1]["error"].as_str().unwrap().contains("token expired"));
+    }
 }
