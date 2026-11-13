@@ -78,6 +78,7 @@ Set these before running.
   - `used_percent`
   - `remaining_percent`
   - optional `resets_at`
+- Codex limit `label` reflects the real window duration from `window_seconds` (`5-hour`, `Weekly`); unrecognized durations fall back to the API's raw `primary`/`secondary` names, so window reshuffles upstream cannot produce a wrong label.
 - Antigravity limit objects additionally carry:
   - `models`: list of model IDs in the quota pool
   - rows with `"unknown": true` and `used_percent: null` mean the API returned no quota info

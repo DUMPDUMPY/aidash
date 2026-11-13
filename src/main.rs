@@ -847,8 +847,14 @@ async fn collect_codex(cfg: &Cfg, client: &reqwest::Client) -> Value {
     let mut limits = Vec::new();
     if let Some(pw) = rl.get("primary_window") {
         let pct = pw.get("used_percent").and_then(|p| p.as_f64()).unwrap_or(0.0);
+        let secs = pw.get("limit_window_seconds").and_then(|s| s.as_i64());
+        let label = match secs {
+            Some(18000) => "5-hour",
+            Some(604800) => "Weekly",
+            _ => "primary",
+        };
         limits.push(json!({
-            "label": "primary",
+            "label": label,
             "used_percent": pct,
             "remaining_percent": (100.0 - pct).max(0.0),
             "window_seconds": pw.get("limit_window_seconds"),
@@ -857,8 +863,14 @@ async fn collect_codex(cfg: &Cfg, client: &reqwest::Client) -> Value {
     }
     if let Some(sw) = rl.get("secondary_window").filter(|s| !s.is_null()) {
         let pct = sw.get("used_percent").and_then(|p| p.as_f64()).unwrap_or(0.0);
+        let secs = sw.get("limit_window_seconds").and_then(|s| s.as_i64());
+        let label = match secs {
+            Some(18000) => "5-hour",
+            Some(604800) => "Weekly",
+            _ => "secondary",
+        };
         limits.push(json!({
-            "label": "secondary",
+            "label": label,
             "used_percent": pct,
             "remaining_percent": (100.0 - pct).max(0.0),
             "window_seconds": sw.get("limit_window_seconds"),

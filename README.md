@@ -34,6 +34,14 @@ An on-machine dashboard that pulls usage/credit usage data from multiple AI prov
 - Passive read-only usage endpoint — polling does not consume quota
 - Plan badge shows `Go`
 
+### Codex (OpenAI)
+
+- Reads OAuth tokens from `~/.codex/auth.json` (path from `CODEX_AUTH_FILE`) and auto-refreshes the access token via `auth.openai.com` when it expires (set `CODEX_DISABLE_REFRESH=1` to skip)
+- Queries `https://chatgpt.com/backend-api/wham/usage` — the same passive usage endpoint the Codex CLI polls; polling does not consume quota
+- Main usage windows are labeled by their real duration from `window_seconds`: **5-hour** (primary window) and **Weekly** (secondary window); unrecognized durations fall back to the raw API names
+- Per-model extra limits (`additional_rate_limits`) are shown as `<name> (5-hour)` / `<name> (Weekly)`
+- Note: OpenAI has announced merging ChatGPT and Codex allowances (token-based) starting December 2026; the usage response shape may change then
+
 ### Antigravity (Google)
 
 - Reads the local OAuth token from `~/.gemini/antigravity-cli/antigravity-oauth-token` (created by the `agy` CLI / Antigravity IDE login)

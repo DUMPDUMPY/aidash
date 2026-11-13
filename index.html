@@ -256,7 +256,7 @@ async function load() {
     document.getElementById("sub").textContent = data.any_error ? "⚠ some providers failed" : "all providers ok";
     render(data);
   } catch (e) {
-    document.getElementById("sub").textContent = "⚠ cannot load data.json — run collect.sh first";
+    document.getElementById("sub").textContent = "⚠ cannot load data.json — backend not running? start with ./ctl.sh start";
   }
 }
 

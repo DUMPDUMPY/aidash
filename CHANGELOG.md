@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.1] - 2026-11-13
+
+### Fixed
+
+- **Codex window labels**: the main `rate_limit` windows now display as **5-hour** / **Weekly** (derived from the real `limit_window_seconds` value, 18000/604800) instead of the raw API field names `primary` / `secondary`, matching the existing `additional_rate_limits` labeling and the other providers. Unknown durations fall back to the raw `primary`/`secondary` name, so an OpenAI window reshuffle (e.g. the announced December 2026 ChatGPT+Codex allowance merge) cannot produce a wrong label.
+- Dashboard load-error message pointed to `collect.sh`, which no longer exists in the project. It now suggests `./ctl.sh start` when `data.json` cannot be fetched.
+
+### Verified (2026-11-13 API audit)
+
+- All provider endpoints queried live and parsers confirmed against raw responses: z.ai, Claude (cswap), Codex, Antigravity, Muse.
+- Antigravity verified field-by-field: `retrieveUserQuotaSummary` still returns only `5h`/`weekly` buckets, and `fetchAvailableModels` model list (19 models → 4 internal `chat_*`/`tab_*` filtered → tiered normalized) matches the dashboard pools exactly (Gemini ×12, Claude + GPT ×3). No update needed.
+- OpenCode Go endpoint is alive and the key authenticates, but returns 403 `EntitlementError: "OpenCode Go subscription required."` — an account subscription state, not an API change. Resubscribe or provide a new key to restore the card.
+
 ## [1.4.0] - 2026-10-22
 
 ### Added
