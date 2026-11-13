@@ -13,15 +13,23 @@ An on-machine dashboard that pulls usage/credit usage data from multiple AI prov
 
 - Single-page dashboard at `/`
 - Provider usage graphs and status cards
+- **Reset bank** per provider: how many usage-window reset credits z.ai (GLM), Codex and Claude accounts still hold, with expiry — read-only, spending stays on each vendor's own page
 - API endpoints:
   - `GET /data.json` for latest snapshot
   - `GET /history.json` for historical snapshots used by sparkline charts
 - First snapshot is collected on startup, then refreshed by a background loop
 - `tmux` control script (`ctl.sh`) for convenient process control
 
+### z.ai (GLM Coding Plan)
+
+- Reads a Bearer API key from a plain text file (default `$HOME/aidash/zai.key`; override with `ZAI_KEY_FILE`)
+- Queries `https://api.z.ai/api/monitor/usage/quota/limit` for the plan's usage windows (**5-hour**, **Weekly**, **MCP/month**)
+- **Reset bank**: also queries `https://api.z.ai/api/biz/customer-package-reset/list?targetType=PERSONAL` and shows how many window resets the plan still holds (5-hour / weekly) and when the soonest one expires. A reset can only be spent on z.ai's own usage page — no spend API exists, aidash is read-only
+
 ### Claude
 
 - **Direct mode** is the default and preserves the original behavior: read active credentials from `$HOME/.claude/.credentials.json`, query `https://api.anthropic.com/api/oauth/usage`, and show one account with token auto-refresh.
+- **Reset bank (cedar_ember)**: the usage query now asks as Claude Code does (`?cedar_ember=1&skip_spend=1`, `User-Agent: claude-cli/<ver>`) and shows the account's usage-limit reset grants, grouped **Full** (clears the weekly window) vs model-named grants from the label (e.g. **Fable**), each with count and soonest expiry. Display only: a grant is spent from Claude Code's own `/limit-reset` (`POST /api/organizations/{org}/reset_rate_limits`), never from aidash. With a non-`claude-cli` User-Agent the endpoint answers `eligible:false, reason:"surface"` and no reset bank is shown.
 - Use the **Multi-account · cswap** button to run `claude-swap list --json` and show every managed account's cached usage. Aidash never reads or decrypts cswap credentials. Only selected mode is polled, avoiding duplicate usage requests.
 - Multi-account refresh follows claude-swap's per-account adaptive polling schedule, not aidash's collection interval (120 seconds via `ctl.sh`; binary default 300 seconds). `list --json` can return cached values for several minutes (sometimes around 10 minutes) until cswap's next poll; Direct mode polls on aidash's interval.
 - The mode button only changes which usage view aidash collects; it does not switch Claude Code accounts. Switch accounts separately with `claude-swap switch <number|email>`.
@@ -40,6 +48,7 @@ An on-machine dashboard that pulls usage/credit usage data from multiple AI prov
 - Queries `https://chatgpt.com/backend-api/wham/usage` — the same passive usage endpoint the Codex CLI polls; polling does not consume quota
 - Main usage windows are labeled by their real duration from `window_seconds`: **5-hour** (primary window) and **Weekly** (secondary window); unrecognized durations fall back to the raw API names
 - Per-model extra limits (`additional_rate_limits`) are shown as `<name> (5-hour)` / `<name> (Weekly)`
+- **Reset bank**: shows the account's rate-limit reset credits (`rate_limit_reset_credits` from the usage payload, detail from `wham/rate-limit-reset-credits`) — count, title, and when the soonest expires. Display only: a credit is spent from Codex's own UI, not from aidash
 - Note: OpenAI has announced merging ChatGPT and Codex allowances (token-based) starting December 2026; the usage response shape may change then
 
 ### Antigravity (Google)
@@ -67,7 +76,7 @@ An on-machine dashboard that pulls usage/credit usage data from multiple AI prov
 
 ## UI Page
 
-![AI Usage Dashboard](./ui-page.svg)
+![AI Usage Dashboard](./ui-page.png)
 
 This is the live dashboard page rendered at `/`.
 

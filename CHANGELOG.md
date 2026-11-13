@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.2] - 2026-11-13
+
+### Added
+
+- **Reset bank display** for z.ai, Codex and Claude: the number of window-reset credits each account still holds, shown as a `🔄 Reset bank` line at the bottom of the card with the soonest expiry date. z.ai reads `api.z.ai/api/biz/customer-package-reset/list?targetType=PERSONAL` (counts available `fiveHourResets`/`weekResets`); Codex reads `rate_limit_reset_credits.available_count` already present in the `wham/usage` payload, plus `wham/rate-limit-reset-credits` for title/expiry when any are held; Claude reads the `cedar_ember` grants from `/api/oauth/usage?cedar_ember=1&skip_spend=1` (asked with a `claude-cli/<ver>` User-Agent — with a `claude-code/<ver>` UA the endpoint answers `eligible:false, reason:"surface"`), grouped **Full** (a grant clearing the weekly window) vs model-named grants parsed from the label (**Fable**) with per-group expiry. All read-only passive endpoints; spending a reset stays on the vendor's own page (z.ai has no spend API, and aidash never spends Codex credits or Claude grants). Fields fail soft: a reset-endpoint error leaves the field absent instead of failing the provider.
+- Replaced the outdated `ui-page.svg` mockup with a real screenshot (`ui-page.png`, headless-Chromium capture of the live dashboard).
+
 ## [1.4.1] - 2026-11-13
 
 ### Fixed

@@ -35,6 +35,8 @@ h1 { font-size:18px; margin-bottom:4px; }
 .spark { height:32px; margin-top:6px; opacity:.95; }
 .spark svg { width:100%; height:100%; display:block; overflow:visible; }
 .reset { color:var(--dim); font-size:11px; margin-top:4px; }
+.resetbank { color:var(--dim); font-size:11px; margin:6px 0 2px; }
+.resetbank .rb { color:var(--green); font-weight:600; }
 details.pool summary { list-style:none; cursor:pointer; }
 details.pool summary::-webkit-details-marker { display:none; }
 details.pool .chev { color:var(--dim); font-size:10px; transition:transform .2s; display:inline-block; margin-left:6px; }
@@ -183,6 +185,32 @@ function limitRow(lim, now, provider, account, source) {
   return `<div class="row">${rowHtml(false)}</div>`;
 }
 
+function resetBankHtml(r) {
+  if (!r) return "";
+  let what = "";
+  if (Array.isArray(r.groups) && r.groups.length) {
+    const parts = r.groups.map(g => {
+      const exp = g.expires_at ? ` · expires ${esc(String(g.expires_at).slice(0, 10))}` : "";
+      return `<span class="rb">${g.count}×${esc(g.label)}</span>${exp}`;
+    });
+    return `<div class="resetbank">🔄 Reset bank: ${parts.join(" + ")}</div>`;
+  }
+  if (r.five_hour !== undefined || r.weekly !== undefined) {
+    const parts = [];
+    if (r.five_hour) parts.push(`${r.five_hour}×5-hour`);
+    if (r.weekly) parts.push(`${r.weekly}×weekly`);
+    if (!parts.length) return "";
+    what = parts.join(" + ");
+  } else if (r.count) {
+    what = `${r.count}×`;
+  } else {
+    return "";
+  }
+  const title = r.title ? ` · ${esc(r.title)}` : "";
+  const exp = r.expires_at ? ` · expires ${esc(String(r.expires_at).slice(0, 10))}` : "";
+  return `<div class="resetbank">🔄 Reset bank: <span class="rb">${what}</span>${title}${exp}</div>`;
+}
+
 function render(data) {
   const now = Math.floor(Date.now() / 1000);
   document.getElementById("collected").textContent = `collected ${new Date(data.ts * 1000).toLocaleTimeString("en-GB")}`;
@@ -203,6 +231,7 @@ function render(data) {
       <div class="card">
         <h2>${meta.icon} ${esc(p.provider)} ${account} ${source} ${plan} ${badge}</h2>
         ${body}
+        ${resetBankHtml(p.resets)}
       </div>`;
   }).join("");
   document.querySelectorAll(".modebar button").forEach(button => {

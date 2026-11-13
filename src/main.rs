@@ -17,7 +17,7 @@ const HTML: &str = include_str!("../index.html");
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const ZAI_UA: &str = "aidash/0.1";
-const CLAUDE_UA: &str = "claude-code/1.0.0";
+const CLAUDE_UA: &str = "claude-cli/2.1.323 (external, cli)";
 // Antigravity talks to the Gemini Cloud Code internal API.
 // Server rejects requests without an "antigravity/..." User-Agent (403).
 // A plain "antigravity/<ver>" UA gets served a stale/legacy quota pool; the
@@ -241,7 +241,62 @@ async fn collect_zai(cfg: &Cfg, client: &reqwest::Client) -> Value {
             }))
         })
         .collect();
-    json!({"provider":"z.ai","status":"ok","plan":level,"limits":out})
+    // Reset bank: window resets the plan may spend on z.ai's own usage
+    // page (read-only; no API to spend one). Best-effort: a failure just
+    // leaves the field out.
+    let resets_resp = client
+        .get("https://api.z.ai/api/biz/customer-package-reset/list?targetType=PERSONAL")
+        .header(header::AUTHORIZATION, &key)
+        .header(header::USER_AGENT, ZAI_UA)
+        .send()
+        .await;
+    let resets = match resets_resp {
+        Ok(r) => r
+            .text()
+            .await
+            .ok()
+            .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+            .and_then(|v| zai_reset_bank(v.pointer("/data"))),
+        Err(_) => None,
+    }
+    .unwrap_or(Value::Null);
+    json!({"provider":"z.ai","status":"ok","plan":level,"limits":out,"resets":resets})
+}
+
+// Counts of the still-available window resets the plan holds and when
+// the soonest one runs out (the vendor's "YYYY-MM-DD HH:MM:SS" string;
+// the frontend shows its date part).
+fn zai_reset_bank(data: Option<&Value>) -> Option<Value> {
+    let data = data?;
+    let count = |arr: &str| -> (i64, Option<String>) {
+        let mut n = 0;
+        let mut soonest: Option<String> = None;
+        if let Some(list) = data.get(arr).and_then(|l| l.as_array()) {
+            for r in list {
+                if r.get("available").and_then(|a| a.as_bool()) != Some(true) {
+                    continue;
+                }
+                n += 1;
+                if let Some(e) = r.get("expireTime").and_then(|t| t.as_str()) {
+                    if soonest.as_deref().map_or(true, |s| e < s) {
+                        soonest = Some(e.to_string());
+                    }
+                }
+            }
+        }
+        (n, soonest)
+    };
+    let (five_hour, fh_exp) = count("fiveHourResets");
+    let (weekly, w_exp) = count("weekResets");
+    if five_hour == 0 && weekly == 0 {
+        return None;
+    }
+    let expires_at = [fh_exp, w_exp].into_iter().flatten().min();
+    Some(json!({
+        "five_hour": five_hour,
+        "weekly": weekly,
+        "expires_at": expires_at,
+    }))
 }
 
 // ---------- OpenCode Go ----------
@@ -360,7 +415,7 @@ fn claude_path_label(path: &Path) -> String {
 
 async fn claude_get(client: &reqwest::Client, token: &str) -> Result<(u16, String), String> {
     let resp = client
-        .get("https://api.anthropic.com/api/oauth/usage")
+        .get("https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1")
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .header(header::USER_AGENT, CLAUDE_UA)
         .send()
@@ -527,7 +582,94 @@ async fn claude_account_usage(
         return Err("no usage limits found in Claude API response".into());
     }
 
-    Ok((email, json!({"provider":"claude","status":"ok","plan":plan,"limits":limits})))
+    let resets = claude_reset_bank(&v);
+    Ok((email, json!({"provider":"claude","status":"ok","plan":plan,"limits":limits,"resets":resets})))
+}
+
+// Reset bank (cedar_ember): usage-limit reset grants the subscription
+// still holds — the same grants Claude Code's /limit-reset spends
+// (POST /api/organizations/{org}/reset_rate_limits). Display only;
+// aidash never spends one. The usage endpoint reports them only when
+// asked as Claude Code asks (cedar_ember=1, a claude-cli/<ver> User-Agent
+// — a claude-code/<ver> UA is told "ineligible: surface").
+fn claude_reset_bank(v: &Value) -> Value {
+    let ce = match v.get("cedar_ember") {
+        Some(c) if !c.is_null() => c,
+        _ => return Value::Null,
+    };
+    if ce.get("eligible").and_then(|e| e.as_bool()) != Some(true) {
+        return Value::Null;
+    }
+    let now = Utc::now().timestamp();
+    let held: Vec<&Value> = ce
+        .get("grants")
+        .and_then(|g| g.as_array())
+        .map(|a| {
+            a.iter()
+                .filter(|g| {
+                    let left = g.get("resets_left").and_then(|r| r.as_i64()).unwrap_or(0);
+                    let paused = g.get("paused").and_then(|p| p.as_bool()) == Some(true);
+                    let ended = g.get("ends_at").and_then(claude_ts).map(|t| t <= now as f64).unwrap_or(false);
+                    left > 0 && !paused && !ended
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if held.is_empty() {
+        return Value::Null;
+    }
+    // A grant that clears the weekly window is a full reset; the rest are
+    // named by their label ("one Fable reset" -> "Fable"), shown as
+    // separate groups: 1x Full + 2x Fable.
+    let mut groups: Vec<(String, i64, Option<String>)> = Vec::new();
+    for g in &held {
+        let clears = g.get("clears").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+        let name = if clears.iter().any(|c| c.as_str() == Some("seven_day")) {
+            "Full".to_string()
+        } else {
+            g.get("label").and_then(|l| l.as_str()).map_or_else(|| "Partial".to_string(), claude_grant_name)
+        };
+        let left = g.get("resets_left").and_then(|r| r.as_i64()).unwrap_or(0);
+        let ends = g.get("ends_at").and_then(|e| e.as_str()).map(str::to_string);
+        match groups.iter_mut().find(|(n, _, _)| *n == name) {
+            Some((_, c, e)) => {
+                *c += left;
+                if ends.as_deref().map_or(false, |d| e.as_deref().map_or(true, |x| d < x)) {
+                    *e = ends;
+                }
+            }
+            None => groups.push((name, left, ends)),
+        }
+    }
+    groups.sort_by(|a, b| {
+        let full = (b.0 == "Full").cmp(&(a.0 == "Full"));
+        full.then_with(|| a.0.cmp(&b.0))
+    });
+    let count: i64 = groups.iter().map(|(_, c, _)| c).sum();
+    let groups_json: Vec<Value> = groups
+        .iter()
+        .map(|(name, c, ends)| json!({"label": name, "count": c, "expires_at": ends}))
+        .collect();
+    json!({"count": count, "groups": groups_json})
+}
+
+// "New model launch: one Fable reset ..." / "... one more Fable
+// reset ..." -> "Fable"; a label naming no reset kind falls back to
+// "Partial".
+fn claude_grant_name(label: &str) -> String {
+    if let Some(rel) = label.find(" reset") {
+        let head = &label[..rel];
+        if let Some(word) = head.rsplit(' ').next() {
+            let generic = word.eq_ignore_ascii_case("one") || word.eq_ignore_ascii_case("more");
+            if !word.is_empty()
+                && !generic
+                && word.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            {
+                return word.to_string();
+            }
+        }
+    }
+    "Partial".to_string()
 }
 
 // ---------- Claude (claude-swap) ----------
@@ -709,10 +851,10 @@ async fn collect_claude_files(cfg: &Cfg, client: &reqwest::Client) -> Vec<Value>
 }
 
 // ---------- Codex ----------
-async fn codex_get(client: &reqwest::Client, token: &str, account_id: &str) -> Result<(u16, String), String> {
+async fn codex_get(client: &reqwest::Client, url: &str, token: &str, account_id: &str) -> Result<(u16, String), String> {
     let do_req = || async {
         let mut req = client
-            .get("https://chatgpt.com/backend-api/wham/usage")
+            .get(url)
             .header(header::AUTHORIZATION, format!("Bearer {token}"))
             .header(header::ACCEPT, "application/json")
             .header(header::ORIGIN, "https://chatgpt.com");
@@ -792,7 +934,8 @@ async fn collect_codex(cfg: &Cfg, client: &reqwest::Client) -> Value {
         return json!({"provider":"codex","status":"error","error":"no access token"});
     }
 
-    let (mut status, mut body) = match codex_get(client, &token, &account_id).await {
+    let usage_url = "https://chatgpt.com/backend-api/wham/usage";
+    let (mut status, mut body) = match codex_get(client, usage_url, &token, &account_id).await {
         Ok(x) => x,
         Err(e) => return json!({"provider":"codex","status":"error","error":e}),
     };
@@ -813,7 +956,7 @@ async fn collect_codex(cfg: &Cfg, client: &reqwest::Client) -> Value {
             match codex_refresh(client, refresh).await {
                 Ok((at, _, _)) => {
                     token = at;
-                    match codex_get(client, &token, &account_id).await {
+                    match codex_get(client, usage_url, &token, &account_id).await {
                         Ok((s, b)) => {
                             status = s;
                             body = b;
@@ -901,7 +1044,54 @@ async fn collect_codex(cfg: &Cfg, client: &reqwest::Client) -> Value {
             }
         }
     }
-    json!({"provider":"codex","status":"ok","plan":plan,"email":email,"limits":limits})
+    // Reset bank: rate-limit reset credits the account holds (display
+    // only — a credit is spent from Codex's own UI). The count rides on
+    // the usage payload already read; the credits' own passive endpoint
+    // says when the soonest one runs out and what it is titled.
+    let resets = codex_reset_bank(client, &token, &account_id, &v).await;
+    json!({"provider":"codex","status":"ok","plan":plan,"email":email,"limits":limits,"resets":resets})
+}
+
+// Count of held reset credits from the usage payload, then best-effort
+// detail read from wham/rate-limit-reset-credits: soonest expires_at and
+// the first held credit's title.
+async fn codex_reset_bank(client: &reqwest::Client, token: &str, account_id: &str, usage: &Value) -> Value {
+    let count = usage
+        .pointer("/rate_limit_reset_credits/available_count")
+        .and_then(|c| c.as_i64())
+        .unwrap_or(0);
+    if count <= 0 {
+        return Value::Null;
+    }
+    let mut out = json!({"count": count});
+    if let Ok((status, body)) = codex_get(client, "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits", token, account_id).await {
+        if status == 200 {
+            if let Ok(d) = serde_json::from_str::<Value>(&body) {
+                let held: Vec<&Value> = d
+                    .get("credits")
+                    .and_then(|c| c.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter(|c| c.get("status").and_then(|s| s.as_str()) == Some("available"))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !held.is_empty() {
+                    if let Some(e) = held
+                        .iter()
+                        .filter_map(|c| c.get("expires_at").and_then(|e| e.as_str()))
+                        .min()
+                    {
+                        out["expires_at"] = json!(e);
+                    }
+                    if let Some(t) = held[0].get("title").and_then(|t| t.as_str()) {
+                        out["title"] = json!(t);
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 // "gemini-3-pro" | "claude-opus-4-6-thinking" | "gpt-oss-120b" -> "Gemini" / "Claude" / "GPT"
