@@ -55,8 +55,8 @@ footer { margin-top:20px; color:var(--dim); font-size:11px; display:flex; justif
 <div class="sub" id="sub">loading...</div>
 <div class="modebar" aria-label="Claude usage mode">
   <span>Claude:</span>
-  <button type="button" data-mode="direct" onclick="setClaudeMode('direct')">Direct · 1 account</button>
-  <button type="button" data-mode="multi" onclick="setClaudeMode('multi')">Multi-account · cswap</button>
+  <button type="button" data-mode="direct" onclick="setClaudeMode('direct')" title="Reads the Claude credentials file directly. Only the generic 5-hour / 7-day windows — no per-model rows (Fable), no reset bank.">Direct · 1 account</button>
+  <button type="button" data-mode="multi" onclick="setClaudeMode('multi')" title="Reads usage via claude-swap. Shows all accounts plus per-model rows (e.g. Fable (7-day)).">Multi-account · cswap</button>
 </div>
 <div class="grid" id="grid"></div>
 <footer>

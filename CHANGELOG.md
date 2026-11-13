@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.3] - 2026-11-13
+
+### Fixed
+
+- **Claude mode survives restart**: the dashboard's Direct/Multi toggle was in-memory only, so every restart reset it to Direct and the claude-swap per-model rows (e.g. **Fable (7-day)**) disappeared until manually toggled back. The chosen mode is now saved to `~/aidash/claude-mode` (override with `AIDASH_CLAUDE_MODE_FILE`) and re-applied at boot; Multi only sticks when claude-swap is available, and anything unreadable falls back to Direct as before.
+- **Fable (7-day) in Direct mode**: the direct `/api/oauth/usage` response already carries per-model weekly windows as `kind: weekly_scoped` entries in its `limits` array (`scope.model.display_name: "Fable"`), but aidash ignored them — only the Multi (claude-swap) tab showed the row. Direct-mode cards now parse those entries into identical `{name} (7-day)` rows, so both tabs render the same picture. Direct cards still show more: the 🔄 Reset bank comes from `cedar_ember`, which only the direct token path provides (claude-swap does not fetch grants).
+- Mode-bar buttons explain themselves on hover: Direct hides per-model rows and the reset bank; Multi shows all accounts plus `Fable (7-day)`.
+
 ## [1.4.2] - 2026-11-13
 
 ### Added

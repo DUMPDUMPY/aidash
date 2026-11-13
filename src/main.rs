@@ -52,6 +52,14 @@ impl ClaudeMode {
             Self::Multi => "multi",
         }
     }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "direct" => Some(Self::Direct),
+            "multi" => Some(Self::Multi),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -63,6 +71,7 @@ struct Cfg {
     codex_auth_file: PathBuf,
     antigravity_token_file: PathBuf,
     muse_auth_file: PathBuf,
+    claude_mode_file: PathBuf,
     listen: String,
     interval: Duration,
 }
@@ -181,6 +190,10 @@ impl Cfg {
                     PathBuf::from(format!("{home}/.config/muse/auth.json"))
                 }
             },
+            claude_mode_file: PathBuf::from(
+                env::var("AIDASH_CLAUDE_MODE_FILE")
+                    .unwrap_or_else(|_| format!("{home}/aidash/claude-mode")),
+            ),
             listen: env::var("AIDASH_LISTEN").unwrap_or_else(|_| "0.0.0.0:8000".into()),
             interval: Duration::from_secs(
                 env::var("AIDASH_INTERVAL").ok().and_then(|s| s.parse().ok()).unwrap_or(300),
@@ -191,6 +204,25 @@ impl Cfg {
 
 fn read_file(p: &PathBuf) -> Result<String, String> {
     std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))
+}
+
+// The Claude mode picked in the dashboard survives restarts: it is stored in
+// a small file next to the other aidash state (zai.key). Multi only sticks
+// when claude-swap is actually available; anything unreadable falls back to
+// Direct, the safe default.
+fn load_claude_mode(path: &PathBuf, swap_available: bool) -> ClaudeMode {
+    read_file(path)
+        .ok()
+        .and_then(|s| ClaudeMode::parse(&s))
+        .filter(|m| *m != ClaudeMode::Multi || swap_available)
+        .unwrap_or(ClaudeMode::Direct)
+}
+
+fn save_claude_mode(path: &PathBuf, mode: ClaudeMode) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, mode.as_str());
 }
 
 fn is_ok_status(v: &Value) -> bool {
@@ -565,6 +597,21 @@ async fn claude_account_usage(
         return Err(format!("{error_val}"));
     }
 
+    let limits = claude_limits(&v);
+
+    if limits.is_empty() {
+        return Err("no usage limits found in Claude API response".into());
+    }
+
+    let resets = claude_reset_bank(&v);
+    Ok((email, json!({"provider":"claude","status":"ok","plan":plan,"limits":limits,"resets":resets})))
+}
+
+// Usage windows for one direct Claude account: the generic five_hour /
+// seven_day windows plus any per-model weekly_scoped entries ("Fable")
+// from the same response's limits array, labeled the way claude-swap
+// shows them so both modes render identical rows.
+fn claude_limits(v: &Value) -> Vec<Value> {
     let mut limits = Vec::new();
     for (key, label) in [("five_hour", "5-hour"), ("seven_day", "7-day")] {
         if let Some(w) = v.get(key) {
@@ -578,14 +625,29 @@ async fn claude_account_usage(
         }
     }
 
-    if limits.is_empty() {
-        return Err("no usage limits found in Claude API response".into());
+    if let Some(entries) = v.get("limits").and_then(|l| l.as_array()) {
+        for w in entries {
+            if w.get("kind").and_then(|k| k.as_str()) != Some("weekly_scoped") {
+                continue;
+            }
+            let Some(name) = w
+                .pointer("/scope/model/display_name")
+                .and_then(|n| n.as_str())
+                .filter(|n| !n.is_empty())
+            else {
+                continue;
+            };
+            let pct = w.get("percent").and_then(|p| p.as_f64()).unwrap_or(0.0);
+            limits.push(json!({
+                "label": format!("{name} (7-day)"),
+                "used_percent": pct,
+                "remaining_percent": (100.0 - pct).max(0.0),
+                "resets_at": w.get("resets_at").and_then(claude_ts),
+            }));
+        }
     }
-
-    let resets = claude_reset_bank(&v);
-    Ok((email, json!({"provider":"claude","status":"ok","plan":plan,"limits":limits,"resets":resets})))
+    limits
 }
-
 // Reset bank (cedar_ember): usage-limit reset grants the subscription
 // still holds — the same grants Claude Code's /limit-reset spends
 // (POST /api/organizations/{org}/reset_rate_limits). Display only;
@@ -1804,6 +1866,7 @@ async fn claude_mode_handler(
 
     let _guard = state.collect_lock.lock().await;
     *state.claude_mode.write().await = mode;
+    save_claude_mode(&state.cfg.claude_mode_file, mode);
     let claude = collect_claude(&state.cfg, &state.client, mode).await;
     let mut data = state.data.read().await.clone();
     if let Some(providers) = data.get_mut("providers").and_then(|p| p.as_array_mut()) {
@@ -1828,18 +1891,19 @@ async fn main() {
 
     let data = Arc::new(RwLock::new(json!({"collected":null,"ts":0,"any_error":true,"providers":[]})));
     let history = Arc::new(RwLock::new(Vec::new()));
+    let boot_mode = load_claude_mode(&cfg.claude_mode_file, cfg.claude_swap_bin.is_some());
     let state = AppState {
         cfg,
         data,
         history,
-        claude_mode: Arc::new(RwLock::new(ClaudeMode::Direct)),
+        claude_mode: Arc::new(RwLock::new(boot_mode)),
         collect_lock: Arc::new(Mutex::new(())),
         client,
     };
 
     // first collect before serving
     let boot_state = state.clone();
-    let boot = collect_all(&boot_state, ClaudeMode::Direct).await;
+    let boot = collect_all(&boot_state, boot_mode).await;
     store_snapshot(&state, boot).await;
 
     // background refresh
@@ -1863,6 +1927,54 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_direct_claude_scoped_model_windows() {
+        // Shaped like the real /api/oauth/usage response: generic windows
+        // plus a weekly_scoped limits entry for the Fable model.
+        let v = json!({
+            "five_hour": { "utilization": 61.0, "resets_at": "2026-11-13T13:00:00.111741+00:00" },
+            "seven_day": { "utilization": 76.0, "resets_at": "2026-11-16T20:00:00.111761+00:00" },
+            "limits": [
+                { "kind": "session", "group": "session", "percent": 61, "severity": "normal",
+                  "resets_at": "2026-11-13T13:00:00.145477+00:00", "scope": null, "is_active": false },
+                { "kind": "weekly_all", "group": "weekly", "percent": 76, "severity": "warning",
+                  "resets_at": "2026-11-16T20:00:00.145504+00:00", "scope": null, "is_active": true },
+                { "kind": "weekly_scoped", "group": "weekly", "percent": 0, "severity": "normal",
+                  "resets_at": "2026-11-16T20:00:00+00:00",
+                  "scope": { "model": { "id": null, "display_name": "Fable" }, "surface": null },
+                  "is_active": false }
+            ]
+        });
+        let mut limits = claude_limits(&v);
+        let scoped: Vec<&Value> = limits
+            .iter()
+            .filter(|l| l["label"] == "Fable (7-day)")
+            .collect();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0]["used_percent"], 0.0);
+        assert!(scoped[0]["resets_at"].as_f64().is_some());
+        assert_eq!(limits.len(), 3);
+    }
+
+    #[test]
+    fn parses_claude_mode_roundtrip_through_file() {
+        let dir = std::env::temp_dir().join(format!("aidash-mode-test-{}", std::process::id()));
+        let path = dir.join("claude-mode");
+        assert_eq!(load_claude_mode(&path, true), ClaudeMode::Direct);
+        save_claude_mode(&path, ClaudeMode::Multi);
+        assert_eq!(load_claude_mode(&path, true), ClaudeMode::Multi);
+        // Multi without claude-swap falls back to Direct.
+        assert_eq!(load_claude_mode(&path, false), ClaudeMode::Direct);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn parses_claude_mode_strings() {
+        assert_eq!(ClaudeMode::parse("multi"), Some(ClaudeMode::Multi));
+        assert_eq!(ClaudeMode::parse(" direct \n"), Some(ClaudeMode::Direct));
+        assert_eq!(ClaudeMode::parse("nope"), None);
+    }
 
     #[test]
     fn parses_labelled_claude_creds() {
